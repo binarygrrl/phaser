@@ -1,320 +1,1199 @@
 /**
-* @author       Richard Davey <rich@photonstorm.com>
-* @copyright    2014 Photon Storm Ltd.
-* @license      {@link https://github.com/photonstorm/phaser/blob/master/license.txt|MIT License}
-*/
+ * @author       Richard Davey <rich@phaser.io>
+ * @copyright    2013-2026 Phaser Studio Inc.
+ * @license      {@link https://opensource.org/licenses/MIT|MIT License}
+ */
+
+var AngleBetweenPoints = require('../../math/angle/BetweenPoints');
+var Body = require('./Body');
+var Clamp = require('../../math/Clamp');
+var Class = require('../../utils/Class');
+var Collider = require('./Collider');
+var CONST = require('./const');
+var DistanceBetween = require('../../math/distance/DistanceBetween');
+var DistanceBetweenPoints = require('../../math/distance/DistanceBetweenPoints');
+var EventEmitter = require('eventemitter3');
+var Events = require('./events');
+var FuzzyEqual = require('../../math/fuzzy/Equal');
+var FuzzyGreaterThan = require('../../math/fuzzy/GreaterThan');
+var FuzzyLessThan = require('../../math/fuzzy/LessThan');
+var GetOverlapX = require('./GetOverlapX');
+var GetOverlapY = require('./GetOverlapY');
+var GetTilesWithinWorldXY = require('../../tilemaps/components/GetTilesWithinWorldXY');
+var GetValue = require('../../utils/object/GetValue');
+var MATH_CONST = require('../../math/const');
+var ProcessQueue = require('../../structs/ProcessQueue');
+var ProcessTileCallbacks = require('./tilemap/ProcessTileCallbacks');
+var Rectangle = require('../../geom/rectangle/Rectangle');
+var RTree = require('../../structs/RTree');
+var SeparateTile = require('./tilemap/SeparateTile');
+var SeparateX = require('./SeparateX');
+var SeparateY = require('./SeparateY');
+var StaticBody = require('./StaticBody');
+var TileIntersectsBody = require('./tilemap/TileIntersectsBody');
+var TransformMatrix = require('../../gameobjects/components/TransformMatrix');
+var Vector2 = require('../../math/Vector2');
+var Wrap = require('../../math/Wrap');
 
 /**
-* The Arcade Physics world. Contains Arcade Physics related collision, overlap and motion methods.
-*
-* @class Phaser.Physics.Arcade
-* @constructor
-* @param {Phaser.Game} game - reference to the current game instance.
-*/
-Phaser.Physics.Arcade = function (game) {
+ * @classdesc
+ * The Arcade Physics World.
+ *
+ * The World is responsible for creating, managing, colliding and updating all of the bodies within it.
+ *
+ * An instance of the World belongs to a Phaser.Scene and is accessed via the property `physics.world`.
+ *
+ * It uses an RTree spatial index for fast broad-phase collision detection and supports
+ * tilemap collision. The World fires events for collisions, overlaps, world bounds
+ * contacts, and pause/resume state changes.
+ *
+ * @class World
+ * @extends Phaser.Events.EventEmitter
+ * @memberof Phaser.Physics.Arcade
+ * @constructor
+ * @since 3.0.0
+ *
+ * @param {Phaser.Scene} scene - The Scene to which this World instance belongs.
+ * @param {Phaser.Types.Physics.Arcade.ArcadeWorldConfig} config - An Arcade Physics Configuration object.
+ */
+var World = new Class({
 
-    /**
-    * @property {Phaser.Game} game - Local reference to game.
-    */
-    this.game = game;
+    Extends: EventEmitter,
 
-    /**
-    * @property {Phaser.Point} gravity - The World gravity setting. Defaults to x: 0, y: 0, or no gravity.
-    */
-    this.gravity = new Phaser.Point();
+    initialize:
 
-    /**
-    * @property {Phaser.Rectangle} bounds - The bounds inside of which the physics world exists. Defaults to match the world bounds.
-    */
-    this.bounds = new Phaser.Rectangle(0, 0, game.world.width, game.world.height);
+    function World (scene, config)
+    {
+        EventEmitter.call(this);
 
-    /**
-    * Set the checkCollision properties to control for which bounds collision is processed.
-    * For example checkCollision.down = false means Bodies cannot collide with the World.bounds.bottom.
-    * @property {object} checkCollision - An object containing allowed collision flags.
-    */
-    this.checkCollision = { up: true, down: true, left: true, right: true };
+        /**
+         * The Scene this simulation belongs to.
+         *
+         * @name Phaser.Physics.Arcade.World#scene
+         * @type {Phaser.Scene}
+         * @since 3.0.0
+         */
+        this.scene = scene;
 
-    /**
-    * @property {number} maxObjects - Used by the QuadTree to set the maximum number of objects per quad.
-    */
-    this.maxObjects = 10;
+        /**
+         * Dynamic Bodies in this simulation.
+         *
+         * @name Phaser.Physics.Arcade.World#bodies
+         * @type {Set.<Phaser.Physics.Arcade.Body>}
+         * @since 3.0.0
+         */
+        this.bodies = new Set();
 
-    /**
-    * @property {number} maxLevels - Used by the QuadTree to set the maximum number of iteration levels.
-    */
-    this.maxLevels = 4;
+        /**
+         * Static Bodies in this simulation.
+         *
+         * @name Phaser.Physics.Arcade.World#staticBodies
+         * @type {Set.<Phaser.Physics.Arcade.StaticBody>}
+         * @since 3.0.0
+         */
+        this.staticBodies = new Set();
 
-    /**
-    * @property {number} OVERLAP_BIAS - A value added to the delta values during collision checks.
-    */
-    this.OVERLAP_BIAS = 4;
+        /**
+         * Static Bodies marked for deletion.
+         *
+         * @name Phaser.Physics.Arcade.World#pendingDestroy
+         * @type {Set.<(Phaser.Physics.Arcade.Body|Phaser.Physics.Arcade.StaticBody)>}
+         * @since 3.1.0
+         */
+        this.pendingDestroy = new Set();
 
-    /**
-    * @property {number} TILE_BIAS - A value added to the delta values during collision with tiles. Adjust this if you get tunnelling.
-    */
-    this.TILE_BIAS = 16;
+        /**
+         * This simulation's collision processors.
+         *
+         * @name Phaser.Physics.Arcade.World#colliders
+         * @type {Phaser.Structs.ProcessQueue.<Phaser.Physics.Arcade.Collider>}
+         * @since 3.0.0
+         */
+        this.colliders = new ProcessQueue();
 
-    /**
-    * @property {boolean} forceX - If true World.separate will always separate on the X axis before Y. Otherwise it will check gravity totals first.
-    */
-    this.forceX = false;
+        /**
+         * Acceleration of Bodies due to gravity, in pixels per second.
+         *
+         * @name Phaser.Physics.Arcade.World#gravity
+         * @type {Phaser.Math.Vector2}
+         * @since 3.0.0
+         */
+        this.gravity = new Vector2(GetValue(config, 'gravity.x', 0), GetValue(config, 'gravity.y', 0));
 
-    /**
-    * @property {boolean} skipQuadTree - If true the QuadTree will not be used for any collision. QuadTrees are great if objects are well spread out in your game, otherwise they are a performance hit. If you enable this you can disable on a per body basis via `Body.skipQuadTree`.
-    */
-    this.skipQuadTree = true;
+        /**
+         * A boundary constraining Bodies.
+         *
+         * @name Phaser.Physics.Arcade.World#bounds
+         * @type {Phaser.Geom.Rectangle}
+         * @since 3.0.0
+         */
+        this.bounds = new Rectangle(
+            GetValue(config, 'x', 0),
+            GetValue(config, 'y', 0),
+            GetValue(config, 'width', scene.sys.scale.width),
+            GetValue(config, 'height', scene.sys.scale.height)
+        );
 
-    /**
-    * @property {Phaser.QuadTree} quadTree - The world QuadTree.
-    */
-    this.quadTree = new Phaser.QuadTree(this.game.world.bounds.x, this.game.world.bounds.y, this.game.world.bounds.width, this.game.world.bounds.height, this.maxObjects, this.maxLevels);
+        /**
+         * The boundary edges that Bodies can collide with.
+         *
+         * @name Phaser.Physics.Arcade.World#checkCollision
+         * @type {Phaser.Types.Physics.Arcade.CheckCollisionObject}
+         * @since 3.0.0
+         */
+        this.checkCollision = {
+            up: GetValue(config, 'checkCollision.up', true),
+            down: GetValue(config, 'checkCollision.down', true),
+            left: GetValue(config, 'checkCollision.left', true),
+            right: GetValue(config, 'checkCollision.right', true)
+        };
 
-    //  Avoid gc spikes by caching these values for re-use
+        /**
+         * The number of physics steps to be taken per second.
+         *
+         * This property is read-only. Use the `setFPS` method to modify it at run-time.
+         *
+         * @name Phaser.Physics.Arcade.World#fps
+         * @readonly
+         * @type {number}
+         * @default 60
+         * @since 3.10.0
+         */
+        this.fps = GetValue(config, 'fps', 60);
 
-    /**
-    * @property {number} _overlap - Internal cache var.
-    * @private
-    */
-    this._overlap = 0;
+        /**
+         * Should Physics use a fixed update time-step (true) or sync to the render fps (false)?.
+         * False value of this property disables fps and timeScale properties.
+         *
+         * @name Phaser.Physics.Arcade.World#fixedStep
+         * @type {boolean}
+         * @default true
+         * @since 3.23.0
+         */
+        this.fixedStep = GetValue(config, 'fixedStep', true);
 
-    /**
-    * @property {number} _maxOverlap - Internal cache var.
-    * @private
-    */
-    this._maxOverlap = 0;
+        /**
+         * The amount of elapsed ms since the last frame.
+         *
+         * @name Phaser.Physics.Arcade.World#_elapsed
+         * @private
+         * @type {number}
+         * @since 3.10.0
+         */
+        this._elapsed = 0;
 
-    /**
-    * @property {number} _velocity1 - Internal cache var.
-    * @private
-    */
-    this._velocity1 = 0;
+        /**
+         * Internal frame time value.
+         *
+         * @name Phaser.Physics.Arcade.World#_frameTime
+         * @private
+         * @type {number}
+         * @since 3.10.0
+         */
+        this._frameTime = 1 / this.fps;
 
-    /**
-    * @property {number} _velocity2 - Internal cache var.
-    * @private
-    */
-    this._velocity2 = 0;
+        /**
+         * Internal frame time ms value.
+         *
+         * @name Phaser.Physics.Arcade.World#_frameTimeMS
+         * @private
+         * @type {number}
+         * @since 3.10.0
+         */
+        this._frameTimeMS = 1000 * this._frameTime;
 
-    /**
-    * @property {number} _newVelocity1 - Internal cache var.
-    * @private
-    */
-    this._newVelocity1 = 0;
+        /**
+         * The number of steps that took place in the last frame.
+         *
+         * @name Phaser.Physics.Arcade.World#stepsLastFrame
+         * @readonly
+         * @type {number}
+         * @since 3.10.0
+         */
+        this.stepsLastFrame = 0;
 
-    /**
-    * @property {number} _newVelocity2 - Internal cache var.
-    * @private
-    */
-    this._newVelocity2 = 0;
+        /**
+         * Scaling factor applied to the frame rate.
+         *
+         * - 1.0 = normal speed
+         * - 2.0 = half speed
+         * - 0.5 = double speed
+         *
+         * @name Phaser.Physics.Arcade.World#timeScale
+         * @type {number}
+         * @default 1
+         * @since 3.10.0
+         */
+        this.timeScale = GetValue(config, 'timeScale', 1);
 
-    /**
-    * @property {number} _average - Internal cache var.
-    * @private
-    */
-    this._average = 0;
+        /**
+         * The maximum absolute difference of a Body's per-step velocity and its overlap with another Body that will result in separation on *each axis*.
+         * Larger values favor separation.
+         * Smaller values favor no separation.
+         *
+         * @name Phaser.Physics.Arcade.World#OVERLAP_BIAS
+         * @type {number}
+         * @default 4
+         * @since 3.0.0
+         */
+        this.OVERLAP_BIAS = GetValue(config, 'overlapBias', 4);
 
-    /**
-    * @property {Array} _mapData - Internal cache var.
-    * @private
-    */
-    this._mapData = [];
+        /**
+         * The maximum absolute value of a Body's overlap with a tile that will result in separation on *each axis*.
+         * Larger values favor separation.
+         * Smaller values favor no separation.
+         * The optimum value may be similar to the tile size.
+         *
+         * @name Phaser.Physics.Arcade.World#TILE_BIAS
+         * @type {number}
+         * @default 16
+         * @since 3.0.0
+         */
+        this.TILE_BIAS = GetValue(config, 'tileBias', 16);
 
-    /**
-    * @property {boolean} _result - Internal cache var.
-    * @private
-    */
-    this._result = false;
+        /**
+         * Always separate overlapping Bodies horizontally before vertically.
+         * False (the default) means Bodies are first separated on the axis of greater gravity, or the vertical axis if neither is greater.
+         *
+         * @name Phaser.Physics.Arcade.World#forceX
+         * @type {boolean}
+         * @default false
+         * @since 3.0.0
+         */
+        this.forceX = GetValue(config, 'forceX', false);
 
-    /**
-    * @property {number} _total - Internal cache var.
-    * @private
-    */
-    this._total = 0;
+        /**
+         * Whether the simulation advances with the game loop.
+         *
+         * @name Phaser.Physics.Arcade.World#isPaused
+         * @type {boolean}
+         * @default false
+         * @since 3.0.0
+         */
+        this.isPaused = GetValue(config, 'isPaused', false);
 
-    /**
-    * @property {number} _angle - Internal cache var.
-    * @private
-    */
-    this._angle = 0;
+        /**
+         * Temporary total of colliding Bodies.
+         *
+         * @name Phaser.Physics.Arcade.World#_total
+         * @type {number}
+         * @private
+         * @default 0
+         * @since 3.0.0
+         */
+        this._total = 0;
 
-    /**
-    * @property {number} _dx - Internal cache var.
-    * @private
-    */
-    this._dx = 0;
+        /**
+         * Enables the debug display.
+         *
+         * @name Phaser.Physics.Arcade.World#drawDebug
+         * @type {boolean}
+         * @default false
+         * @since 3.0.0
+         */
+        this.drawDebug = GetValue(config, 'debug', false);
 
-    /**
-    * @property {number} _dy - Internal cache var.
-    * @private
-    */
-    this._dy = 0;
+        /**
+         * The graphics object drawing the debug display.
+         *
+         * @name Phaser.Physics.Arcade.World#debugGraphic
+         * @type {Phaser.GameObjects.Graphics}
+         * @since 3.0.0
+         */
+        this.debugGraphic;
 
-    // By default we want the bounds the same size as the world bounds
-    this.setBoundsToWorld();
+        /**
+         * Default debug display settings for new Bodies.
+         *
+         * @name Phaser.Physics.Arcade.World#defaults
+         * @type {Phaser.Types.Physics.Arcade.ArcadeWorldDefaults}
+         * @since 3.0.0
+         */
+        this.defaults = {
+            debugShowBody: GetValue(config, 'debugShowBody', true),
+            debugShowStaticBody: GetValue(config, 'debugShowStaticBody', true),
+            debugShowVelocity: GetValue(config, 'debugShowVelocity', true),
+            bodyDebugColor: GetValue(config, 'debugBodyColor', 0xff00ff),
+            staticBodyDebugColor: GetValue(config, 'debugStaticBodyColor', 0x0000ff),
+            velocityDebugColor: GetValue(config, 'debugVelocityColor', 0x00ff00)
+        };
 
-};
+        /**
+         * The maximum number of items per node on the RTree.
+         *
+         * This is ignored if `useTree` is `false`. If you have a large number of bodies in
+         * your world then you may find search performance improves by increasing this value,
+         * to allow more items per node and less node division.
+         *
+         * @name Phaser.Physics.Arcade.World#maxEntries
+         * @type {number}
+         * @default 16
+         * @since 3.0.0
+         */
+        this.maxEntries = GetValue(config, 'maxEntries', 16);
 
-Phaser.Physics.Arcade.prototype.constructor = Phaser.Physics.Arcade;
+        /**
+         * Should this Arcade Physics World use an RTree for Dynamic bodies?
+         *
+         * An RTree is a fast way of spatially sorting of all the bodies in the world.
+         * However, at certain limits, the cost of clearing and inserting the bodies into the
+         * tree every frame becomes more expensive than the search speed gains it provides.
+         *
+         * If you have a large number of dynamic bodies in your world then it may be best to
+         * disable the use of the RTree by setting this property to `false` in the physics config.
+         *
+         * The number it can cope with depends on browser and device, but a conservative estimate
+         * of around 5,000 bodies should be considered the max before disabling it.
+         *
+         * This only applies to dynamic bodies. Static bodies are always kept in an RTree,
+         * because they don't have to be cleared every frame, so you benefit from the
+         * massive search speeds all the time.
+         *
+         * @name Phaser.Physics.Arcade.World#useTree
+         * @type {boolean}
+         * @default true
+         * @since 3.10.0
+         */
+        this.useTree = GetValue(config, 'useTree', true);
 
-Phaser.Physics.Arcade.prototype = {
+        /**
+         * The spatial index of Dynamic Bodies.
+         *
+         * @name Phaser.Physics.Arcade.World#tree
+         * @type {Phaser.Structs.RTree}
+         * @since 3.0.0
+         */
+        this.tree = new RTree(this.maxEntries);
 
-    /**
-    * Updates the size of this physics world.
-    *
-    * @method Phaser.Physics.Arcade#setBounds
-    * @param {number} x - Top left most corner of the world.
-    * @param {number} y - Top left most corner of the world.
-    * @param {number} width - New width of the world. Can never be smaller than the Game.width.
-    * @param {number} height - New height of the world. Can never be smaller than the Game.height.
-    */
-    setBounds: function (x, y, width, height) {
+        /**
+         * The spatial index of Static Bodies.
+         *
+         * @name Phaser.Physics.Arcade.World#staticTree
+         * @type {Phaser.Structs.RTree}
+         * @since 3.0.0
+         */
+        this.staticTree = new RTree(this.maxEntries);
 
-        this.bounds.setTo(x, y, width, height);
+        /**
+         * Recycled input for tree searches.
+         *
+         * @name Phaser.Physics.Arcade.World#treeMinMax
+         * @type {Phaser.Types.Physics.Arcade.ArcadeWorldTreeMinMax}
+         * @since 3.0.0
+         */
+        this.treeMinMax = { minX: 0, minY: 0, maxX: 0, maxY: 0 };
 
-    },
+        /**
+         * A temporary Transform Matrix used by bodies for calculations without them needing their own local copy.
+         *
+         * @name Phaser.Physics.Arcade.World#_tempMatrix
+         * @type {Phaser.GameObjects.Components.TransformMatrix}
+         * @private
+         * @since 3.12.0
+         */
+        this._tempMatrix = new TransformMatrix();
 
-    /**
-    * Updates the size of this physics world to match the size of the game world.
-    *
-    * @method Phaser.Physics.Arcade#setBoundsToWorld
-    */
-    setBoundsToWorld: function () {
+        /**
+         * A temporary Transform Matrix used by bodies for calculations without them needing their own local copy.
+         *
+         * @name Phaser.Physics.Arcade.World#_tempMatrix2
+         * @type {Phaser.GameObjects.Components.TransformMatrix}
+         * @private
+         * @since 3.12.0
+         */
+        this._tempMatrix2 = new TransformMatrix();
 
-        this.bounds.setTo(this.game.world.bounds.x, this.game.world.bounds.y, this.game.world.bounds.width, this.game.world.bounds.height);
+        /**
+         * The Filtering Options passed to `GetTilesWithinWorldXY` as part of the `collideSpriteVsTilemapLayer` check.
+         *
+         * @name Phaser.Physics.Arcade.World#tileFilterOptions
+         * @type {Phaser.Types.Tilemaps.FilteringOptions}
+         * @since 3.60.0
+         */
+        this.tileFilterOptions = { isColliding: true, isNotEmpty: true, hasInterestingFace: true };
 
-    },
-
-    /**
-    * This will create an Arcade Physics body on the given game object or array of game objects.
-    * A game object can only have 1 physics body active at any one time, and it can't be changed until the object is destroyed.
-    *
-    * @method Phaser.Physics.Arcade#enable
-    * @param {object|array|Phaser.Group} object - The game object to create the physics body on. Can also be an array or Group of objects, a body will be created on every child that has a `body` property.
-    * @param {boolean} [children=true] - Should a body be created on all children of this object? If true it will recurse down the display list as far as it can go.
-    */
-    enable: function (object, children) {
-
-        if (typeof children === 'undefined') { children = true; }
-
-        var i = 1;
-
-        if (Array.isArray(object))
+        if (this.drawDebug)
         {
-            i = object.length;
+            this.createDebugGraphic();
+        }
+    },
 
-            while (i--)
+    /**
+     * Adds an Arcade Physics Body to a Game Object, an array of Game Objects, or the children of a Group.
+     *
+     * The difference between this and the `enableBody` method is that you can pass arrays or Groups
+     * to this method.
+     *
+     * You can specify if the bodies are to be Dynamic or Static. A dynamic body can move via velocity and
+     * acceleration. A static body remains fixed in place and as such is able to use an optimized search
+     * tree, making it ideal for static elements such as level objects. You can still collide and overlap
+     * with static bodies.
+     *
+     * Normally, rather than calling this method directly, you'd use the helper methods available in the
+     * Arcade Physics Factory, such as:
+     *
+     * ```javascript
+     * this.physics.add.image(x, y, textureKey);
+     * this.physics.add.sprite(x, y, textureKey);
+     * ```
+     *
+     * Calling factory methods encapsulates the creation of a Game Object and the creation of its
+     * body at the same time. If you are creating custom classes then you can pass them to this
+     * method to have their bodies created.
+     *
+     * @method Phaser.Physics.Arcade.World#enable
+     * @since 3.0.0
+     *
+     * @param {(Phaser.GameObjects.GameObject|Phaser.GameObjects.GameObject[]|Phaser.GameObjects.Group|Phaser.GameObjects.Group[])} object - The object, or objects, on which to create the bodies.
+     * @param {number} [bodyType] - The type of Body to create. Either `DYNAMIC_BODY` or `STATIC_BODY`.
+     */
+    enable: function (object, bodyType)
+    {
+        if (bodyType === undefined) { bodyType = CONST.DYNAMIC_BODY; }
+
+        if (!Array.isArray(object))
+        {
+            object = [ object ];
+        }
+
+        for (var i = 0; i < object.length; i++)
+        {
+            var entry = object[i];
+
+            if (entry.isParent)
             {
-                if (object[i] instanceof Phaser.Group)
-                {
-                    //  If it's a Group then we do it on the children regardless
-                    this.enable(object[i].children, children);
-                }
-                else
-                {
-                    this.enableBody(object[i]);
+                var children = entry.getChildren();
 
-                    if (children && object[i].hasOwnProperty('children') && object[i].children.length > 0)
+                for (var c = 0; c < children.length; c++)
+                {
+                    var child = children[c];
+
+                    if (child.isParent)
                     {
-                        this.enable(object[i], true);
+                        //  Handle Groups nested inside of Groups
+                        this.enable(child, bodyType);
+                    }
+                    else
+                    {
+                        this.enableBody(child, bodyType);
                     }
                 }
             }
-        }
-        else
-        {
-            if (object instanceof Phaser.Group)
+            else
             {
-                //  If it's a Group then we do it on the children regardless
-                this.enable(object.children, children);
+                this.enableBody(entry, bodyType);
+            }
+        }
+    },
+
+    /**
+     * Creates an Arcade Physics Body on a single Game Object.
+     *
+     * If the Game Object already has a body, this method will simply add it back into the simulation.
+     *
+     * You can specify if the body is Dynamic or Static. A dynamic body can move via velocity and
+     * acceleration. A static body remains fixed in place and as such is able to use an optimized search
+     * tree, making it ideal for static elements such as level objects. You can still collide and overlap
+     * with static bodies.
+     *
+     * Normally, rather than calling this method directly, you'd use the helper methods available in the
+     * Arcade Physics Factory, such as:
+     *
+     * ```javascript
+     * this.physics.add.image(x, y, textureKey);
+     * this.physics.add.sprite(x, y, textureKey);
+     * ```
+     *
+     * Calling factory methods encapsulates the creation of a Game Object and the creation of its
+     * body at the same time. If you are creating custom classes then you can pass them to this
+     * method to have their bodies created.
+     *
+     * @method Phaser.Physics.Arcade.World#enableBody
+     * @since 3.0.0
+     *
+     * @param {Phaser.GameObjects.GameObject} object - The Game Object on which to create the body.
+     * @param {number} [bodyType] - The type of Body to create. Either `DYNAMIC_BODY` or `STATIC_BODY`.
+     *
+     * @return {Phaser.GameObjects.GameObject} The Game Object on which the body was created.
+     */
+    enableBody: function (object, bodyType)
+    {
+        if (bodyType === undefined) { bodyType = CONST.DYNAMIC_BODY; }
+
+        if (object.hasTransformComponent)
+        {
+            if (!object.body)
+            {
+                if (bodyType === CONST.DYNAMIC_BODY)
+                {
+                    object.body = new Body(this, object);
+                }
+                else if (bodyType === CONST.STATIC_BODY)
+                {
+                    object.body = new StaticBody(this, object);
+                }
+            }
+
+            this.add(object.body);
+        }
+
+        return object;
+    },
+
+    /**
+     * Adds an existing Arcade Physics Body or StaticBody to the simulation.
+     *
+     * The body is enabled and added to the local search trees.
+     *
+     * @method Phaser.Physics.Arcade.World#add
+     * @since 3.10.0
+     *
+     * @param {(Phaser.Physics.Arcade.Body|Phaser.Physics.Arcade.StaticBody)} body - The Body to be added to the simulation.
+     *
+     * @return {(Phaser.Physics.Arcade.Body|Phaser.Physics.Arcade.StaticBody)} The Body that was added to the simulation.
+     */
+    add: function (body)
+    {
+        if (body.physicsType === CONST.DYNAMIC_BODY)
+        {
+            this.bodies.add(body);
+        }
+        else if (body.physicsType === CONST.STATIC_BODY)
+        {
+            this.staticBodies.add(body);
+
+            this.staticTree.insert(body);
+        }
+
+        body.enable = true;
+
+        return body;
+    },
+
+    /**
+     * Disables the Arcade Physics Body of a Game Object, an array of Game Objects, or the children of a Group.
+     *
+     * The difference between this and the `disableBody` method is that you can pass arrays or Groups
+     * to this method.
+     *
+     * The body itself is not deleted, it just has its `enable` property set to false, which
+     * means you can re-enable it again at any point by passing it to `World.enable` or `World.add`.
+     *
+     * @method Phaser.Physics.Arcade.World#disable
+     * @since 3.0.0
+     *
+     * @param {(Phaser.GameObjects.GameObject|Phaser.GameObjects.GameObject[]|Phaser.GameObjects.Group|Phaser.GameObjects.Group[])} object - The object, or objects, on which to disable the bodies.
+     */
+    disable: function (object)
+    {
+        if (!Array.isArray(object))
+        {
+            object = [ object ];
+        }
+
+        for (var i = 0; i < object.length; i++)
+        {
+            var entry = object[i];
+
+            if (entry.isParent)
+            {
+                var children = entry.getChildren();
+
+                for (var c = 0; c < children.length; c++)
+                {
+                    var child = children[c];
+
+                    if (child.isParent)
+                    {
+                        //  Handle Groups nested inside of Groups
+                        this.disable(child);
+                    }
+                    else
+                    {
+                        this.disableBody(child.body);
+                    }
+                }
             }
             else
             {
-                this.enableBody(object);
+                this.disableBody(entry.body);
+            }
+        }
+    },
 
-                if (children && object.hasOwnProperty('children') && object.children.length > 0)
+    /**
+     * Disables an existing Arcade Physics Body or StaticBody and removes it from the simulation.
+     *
+     * The body is disabled and removed from the local search trees.
+     *
+     * The body itself is not deleted, it just has its `enable` property set to false, which
+     * means you can re-enable it again at any point by passing it to `World.enable` or `World.add`.
+     *
+     * @method Phaser.Physics.Arcade.World#disableBody
+     * @since 3.0.0
+     *
+     * @param {(Phaser.Physics.Arcade.Body|Phaser.Physics.Arcade.StaticBody)} body - The Body to be disabled.
+     */
+    disableBody: function (body)
+    {
+        this.remove(body);
+
+        body.enable = false;
+    },
+
+    /**
+     * Removes an existing Arcade Physics Body or StaticBody from the simulation.
+     *
+     * The body is disabled and removed from the local search trees.
+     *
+     * The body itself is not deleted, it just has its `enabled` property set to false, which
+     * means you can re-enable it again at any point by passing it to `World.enable` or `World.add`.
+     *
+     * @method Phaser.Physics.Arcade.World#remove
+     * @since 3.0.0
+     *
+     * @param {(Phaser.Physics.Arcade.Body|Phaser.Physics.Arcade.StaticBody)} body - The body to be removed from the simulation.
+     */
+    remove: function (body)
+    {
+        if (body.physicsType === CONST.DYNAMIC_BODY)
+        {
+            this.tree.remove(body);
+            this.bodies.delete(body);
+        }
+        else if (body.physicsType === CONST.STATIC_BODY)
+        {
+            this.staticBodies.delete(body);
+            this.staticTree.remove(body);
+        }
+    },
+
+    /**
+     * Creates a Graphics Game Object that the world will use to render the debug display to.
+     *
+     * This is called automatically when the World is instantiated if the `debug` config property
+     * was set to `true`. However, you can call it at any point should you need to display the
+     * debug Graphic from a fixed point.
+     *
+     * You can control which objects are drawn to the Graphics object, and the colors they use,
+     * by setting the debug properties in the physics config.
+     *
+     * You should not typically use this in a production game. Use it to aid during debugging.
+     *
+     * @method Phaser.Physics.Arcade.World#createDebugGraphic
+     * @since 3.0.0
+     *
+     * @return {Phaser.GameObjects.Graphics} The Graphics object that was created for use by the World.
+     */
+    createDebugGraphic: function ()
+    {
+        var graphic = this.scene.sys.add.graphics({ x: 0, y: 0 });
+
+        graphic.setDepth(Number.MAX_VALUE);
+
+        this.debugGraphic = graphic;
+
+        this.drawDebug = true;
+
+        return graphic;
+    },
+
+    /**
+     * Sets the position, size and properties of the World boundary.
+     *
+     * The World boundary is an invisible rectangle that defines the edges of the World.
+     * If a Body is set to collide with the world bounds then it will automatically stop
+     * when it reaches any of the edges. You can optionally set which edges of the boundary
+     * should be checked against.
+     *
+     * @method Phaser.Physics.Arcade.World#setBounds
+     * @since 3.0.0
+     *
+     * @param {number} x - The top-left x coordinate of the boundary.
+     * @param {number} y - The top-left y coordinate of the boundary.
+     * @param {number} width - The width of the boundary.
+     * @param {number} height - The height of the boundary.
+     * @param {boolean} [checkLeft] - Should bodies check against the left edge of the boundary?
+     * @param {boolean} [checkRight] - Should bodies check against the right edge of the boundary?
+     * @param {boolean} [checkUp] - Should bodies check against the top edge of the boundary?
+     * @param {boolean} [checkDown] - Should bodies check against the bottom edge of the boundary?
+     *
+     * @return {Phaser.Physics.Arcade.World} This World object.
+     */
+    setBounds: function (x, y, width, height, checkLeft, checkRight, checkUp, checkDown)
+    {
+        this.bounds.setTo(x, y, width, height);
+
+        if (checkLeft !== undefined)
+        {
+            this.setBoundsCollision(checkLeft, checkRight, checkUp, checkDown);
+        }
+
+        return this;
+    },
+
+    /**
+     * Enables or disables collisions on each edge of the World boundary.
+     *
+     * @method Phaser.Physics.Arcade.World#setBoundsCollision
+     * @since 3.0.0
+     *
+     * @param {boolean} [left=true] - Should bodies check against the left edge of the boundary?
+     * @param {boolean} [right=true] - Should bodies check against the right edge of the boundary?
+     * @param {boolean} [up=true] - Should bodies check against the top edge of the boundary?
+     * @param {boolean} [down=true] - Should bodies check against the bottom edge of the boundary?
+     *
+     * @return {Phaser.Physics.Arcade.World} This World object.
+     */
+    setBoundsCollision: function (left, right, up, down)
+    {
+        if (left === undefined) { left = true; }
+        if (right === undefined) { right = true; }
+        if (up === undefined) { up = true; }
+        if (down === undefined) { down = true; }
+
+        this.checkCollision.left = left;
+        this.checkCollision.right = right;
+        this.checkCollision.up = up;
+        this.checkCollision.down = down;
+
+        return this;
+    },
+
+    /**
+     * Pauses the simulation.
+     *
+     * A paused simulation does not update any existing bodies, or run any Colliders.
+     *
+     * However, you can still enable and disable bodies within it, or manually run collide or overlap
+     * checks.
+     *
+     * @method Phaser.Physics.Arcade.World#pause
+     * @fires Phaser.Physics.Arcade.Events#PAUSE
+     * @since 3.0.0
+     *
+     * @return {Phaser.Physics.Arcade.World} This World object.
+     */
+    pause: function ()
+    {
+        this.isPaused = true;
+
+        this.emit(Events.PAUSE);
+
+        return this;
+    },
+
+    /**
+     * Resumes the simulation, if paused.
+     *
+     * @method Phaser.Physics.Arcade.World#resume
+     * @fires Phaser.Physics.Arcade.Events#RESUME
+     * @since 3.0.0
+     *
+     * @return {Phaser.Physics.Arcade.World} This World object.
+     */
+    resume: function ()
+    {
+        this.isPaused = false;
+
+        this.emit(Events.RESUME);
+
+        return this;
+    },
+
+    /**
+     * Creates a new Collider object and adds it to the simulation.
+     *
+     * A Collider is a way to automatically perform collision checks between two objects,
+     * calling the collide and process callbacks if they occur.
+     *
+     * Colliders are run as part of the World update, after all of the Bodies have updated.
+     *
+     * By creating a Collider you don't need to then call `World.collide` in your `update` loop,
+     * as it will be handled for you automatically.
+     *
+     * @method Phaser.Physics.Arcade.World#addCollider
+     * @since 3.0.0
+     * @see Phaser.Physics.Arcade.World#collide
+     *
+     * @param {Phaser.Types.Physics.Arcade.ArcadeColliderType} object1 - The first object to check for collision.
+     * @param {Phaser.Types.Physics.Arcade.ArcadeColliderType} object2 - The second object to check for collision.
+     * @param {Phaser.Types.Physics.Arcade.ArcadePhysicsCallback} [collideCallback] - The callback to invoke when the two objects collide.
+     * @param {Phaser.Types.Physics.Arcade.ArcadePhysicsCallback} [processCallback] - The callback to invoke when the two objects collide. Must return a boolean.
+     * @param {*} [callbackContext] - The scope in which to call the callbacks.
+     *
+     * @return {Phaser.Physics.Arcade.Collider} The Collider that was created.
+     */
+    addCollider: function (object1, object2, collideCallback, processCallback, callbackContext)
+    {
+        if (collideCallback === undefined) { collideCallback = null; }
+        if (processCallback === undefined) { processCallback = null; }
+        if (callbackContext === undefined) { callbackContext = collideCallback; }
+
+        var collider = new Collider(this, false, object1, object2, collideCallback, processCallback, callbackContext);
+
+        this.colliders.add(collider);
+
+        return collider;
+    },
+
+    /**
+     * Creates a new Overlap Collider object and adds it to the simulation.
+     *
+     * A Collider is a way to automatically perform overlap checks between two objects,
+     * calling the collide and process callbacks if they occur.
+     *
+     * Colliders are run as part of the World update, after all of the Bodies have updated.
+     *
+     * By creating a Collider you don't need to then call `World.overlap` in your `update` loop,
+     * as it will be handled for you automatically.
+     *
+     * @method Phaser.Physics.Arcade.World#addOverlap
+     * @since 3.0.0
+     *
+     * @param {Phaser.Types.Physics.Arcade.ArcadeColliderType} object1 - The first object to check for overlap.
+     * @param {Phaser.Types.Physics.Arcade.ArcadeColliderType} object2 - The second object to check for overlap.
+     * @param {Phaser.Types.Physics.Arcade.ArcadePhysicsCallback} [collideCallback] - The callback to invoke when the two objects overlap.
+     * @param {Phaser.Types.Physics.Arcade.ArcadePhysicsCallback} [processCallback] - The callback to invoke when the two objects overlap. Must return a boolean.
+     * @param {*} [callbackContext] - The scope in which to call the callbacks.
+     *
+     * @return {Phaser.Physics.Arcade.Collider} The Collider that was created.
+     */
+    addOverlap: function (object1, object2, collideCallback, processCallback, callbackContext)
+    {
+        if (collideCallback === undefined) { collideCallback = null; }
+        if (processCallback === undefined) { processCallback = null; }
+        if (callbackContext === undefined) { callbackContext = collideCallback; }
+
+        var collider = new Collider(this, true, object1, object2, collideCallback, processCallback, callbackContext);
+
+        this.colliders.add(collider);
+
+        return collider;
+    },
+
+    /**
+     * Removes a Collider from the simulation so it is no longer processed.
+     *
+     * This method does not destroy the Collider. If you wish to add it back at a later stage you can call
+     * `World.colliders.add(Collider)`.
+     *
+     * If you no longer need the Collider you can call the `Collider.destroy` method instead, which will
+     * automatically clear all of its references and then remove it from the World. If you call destroy on
+     * a Collider you _don't_ need to pass it to this method too.
+     *
+     * @method Phaser.Physics.Arcade.World#removeCollider
+     * @since 3.0.0
+     *
+     * @param {Phaser.Physics.Arcade.Collider} collider - The Collider to remove from the simulation.
+     *
+     * @return {Phaser.Physics.Arcade.World} This World object.
+     */
+    removeCollider: function (collider)
+    {
+        this.colliders.remove(collider);
+
+        return this;
+    },
+
+    /**
+     * Sets the frame rate to run the simulation at.
+     *
+     * The frame rate value is used to simulate a fixed update time step. This fixed
+     * time step allows for a straightforward implementation of a deterministic game state.
+     *
+     * This frame rate is independent of the frequency at which the game is rendering. The
+     * higher you set the fps, the more physics simulation steps will occur per game step.
+     * Conversely, the lower you set it, the less will take place.
+     *
+     * You can optionally advance the simulation directly yourself by calling the `step` method.
+     *
+     * @method Phaser.Physics.Arcade.World#setFPS
+     * @since 3.10.0
+     *
+     * @param {number} framerate - The frame rate to advance the simulation at.
+     *
+     * @return {this} This World object.
+     */
+    setFPS: function (framerate)
+    {
+        this.fps = framerate;
+        this._frameTime = 1 / this.fps;
+        this._frameTimeMS = 1000 * this._frameTime;
+
+        return this;
+    },
+
+    /**
+     * Advances the simulation based on the elapsed time and fps rate.
+     *
+     * This is called automatically by your Scene and does not need to be invoked directly.
+     *
+     * @method Phaser.Physics.Arcade.World#update
+     * @fires Phaser.Physics.Arcade.Events#WORLD_STEP
+     * @since 3.0.0
+     *
+     * @param {number} time - The current timestamp as generated by the Request Animation Frame or SetTimeout.
+     * @param {number} delta - The delta time, in ms, elapsed since the last frame.
+     */
+    update: function (time, delta)
+    {
+        if (this.isPaused || this.bodies.size === 0)
+        {
+            return;
+        }
+
+        var fixedDelta = this._frameTime;
+        var msPerFrame = this._frameTimeMS * this.timeScale;
+
+        this._elapsed += delta;
+
+        //  Update all active bodies
+        var bodies = this.bodies;
+
+        //  Will a step happen this frame?
+        var willStep = (this._elapsed >= msPerFrame);
+
+        if (!this.fixedStep)
+        {
+            fixedDelta = delta * 0.001;
+            willStep = true;
+            this._elapsed = 0;
+        }
+
+        bodies.forEach(function (body)
+        {
+            if (body.enable)
+            {
+                body.preUpdate(willStep, fixedDelta);
+            }
+        });
+
+        //  We know that a step will happen this frame, so let's bundle it all together to save branching and iteration costs
+        if (willStep)
+        {
+            this._elapsed -= msPerFrame;
+            this.stepsLastFrame = 1;
+
+            //  Optionally populate our dynamic collision tree
+            if (this.useTree)
+            {
+                this.tree.clear();
+                this.tree.load(Array.from(bodies));
+            }
+
+            //  Process any colliders
+            var colliders = this.colliders.update();
+
+            for (var i = 0; i < colliders.length; i++)
+            {
+                var collider = colliders[i];
+
+                if (collider.active)
                 {
-                    this.enable(object.children, true);
+                    collider.update();
                 }
+            }
+
+            this.emit(Events.WORLD_STEP, fixedDelta);
+        }
+
+        //  Process any additional steps this frame
+        while (this._elapsed >= msPerFrame)
+        {
+            this._elapsed -= msPerFrame;
+
+            this.step(fixedDelta);
+        }
+    },
+
+    /**
+     * Advances the simulation by a time increment.
+     *
+     * @method Phaser.Physics.Arcade.World#step
+     * @fires Phaser.Physics.Arcade.Events#WORLD_STEP
+     * @since 3.10.0
+     *
+     * @param {number} delta - The delta time amount, in seconds, by which to advance the simulation.
+     */
+    step: function (delta)
+    {
+        //  Update all active bodies
+        var bodies = this.bodies;
+
+        bodies.forEach(function (body)
+        {
+            if (body.enable)
+            {
+                body.update(delta);
+            }
+        });
+
+        //  Optionally populate our dynamic collision tree
+        if (this.useTree)
+        {
+            this.tree.clear();
+            this.tree.load(Array.from(bodies));
+        }
+
+        //  Process any colliders
+        var colliders = this.colliders.update();
+
+        for (var i = 0; i < colliders.length; i++)
+        {
+            var collider = colliders[i];
+
+            if (collider.active)
+            {
+                collider.update();
             }
         }
 
+        this.emit(Events.WORLD_STEP, delta);
+
+        this.stepsLastFrame++;
     },
 
     /**
-    * Creates an Arcade Physics body on the given game object.
-    * A game object can only have 1 physics body active at any one time, and it can't be changed until the body is nulled.
-    *
-    * @method Phaser.Physics.Arcade#enableBody
-    * @param {object} object - The game object to create the physics body on. A body will only be created if this object has a null `body` property.
-    */
-    enableBody: function (object) {
+     * Advances the simulation by a single step.
+     *
+     * @method Phaser.Physics.Arcade.World#singleStep
+     * @fires Phaser.Physics.Arcade.Events#WORLD_STEP
+     * @since 3.70.0
+     */
+    singleStep: function ()
+    {
+        this.update(0, this._frameTimeMS);
 
-        if (object.hasOwnProperty('body') && object.body === null)
-        {
-            object.body = new Phaser.Physics.Arcade.Body(object);
-        }
-
+        this.postUpdate();
     },
 
     /**
-    * Called automatically by a Physics body, it updates all motion related values on the Body.
-    *
-    * @method Phaser.Physics.Arcade#updateMotion
-    * @param {Phaser.Physics.Arcade.Body} The Body object to be updated.
-    */
-    updateMotion: function (body) {
+     * Updates bodies, draws the debug display, and handles pending queue operations.
+     *
+     * @method Phaser.Physics.Arcade.World#postUpdate
+     * @since 3.0.0
+     */
+    postUpdate: function ()
+    {
+        var dynamic = this.bodies;
+        var staticBodies = this.staticBodies;
 
-        this._velocityDelta = this.computeVelocity(0, body, body.angularVelocity, body.angularAcceleration, body.angularDrag, body.maxAngular) - body.angularVelocity;
-        body.angularVelocity += this._velocityDelta;
-        body.rotation += (body.angularVelocity * this.game.time.physicsElapsed);
+        //  We don't need to postUpdate if there wasn't a step this frame
+        if (this.stepsLastFrame)
+        {
+            this.stepsLastFrame = 0;
 
-        body.velocity.x = this.computeVelocity(1, body, body.velocity.x, body.acceleration.x, body.drag.x, body.maxVelocity.x);
-        body.velocity.y = this.computeVelocity(2, body, body.velocity.y, body.acceleration.y, body.drag.y, body.maxVelocity.y);
+            dynamic.forEach(function (body)
+            {
+                if (body.enable)
+                {
+                    body.postUpdate();
+                }
+            });
+        }
 
+        if (this.drawDebug)
+        {
+            var graphics = this.debugGraphic;
+
+            graphics.clear();
+
+            dynamic.forEach(function (body)
+            {
+                if (body.willDrawDebug())
+                {
+                    body.drawDebug(graphics);
+                }
+            });
+
+            staticBodies.forEach(function (body)
+            {
+                if (body.willDrawDebug())
+                {
+                    body.drawDebug(graphics);
+                }
+            });
+        }
+
+        var pending = this.pendingDestroy;
+
+        if (pending.size > 0)
+        {
+            var dynamicTree = this.tree;
+            var staticTree = this.staticTree;
+
+            pending.forEach(function (body)
+            {
+                if (body.physicsType === CONST.DYNAMIC_BODY)
+                {
+                    dynamicTree.remove(body);
+                    dynamic.delete(body);
+                }
+                else if (body.physicsType === CONST.STATIC_BODY)
+                {
+                    staticTree.remove(body);
+                    staticBodies.delete(body);
+                }
+
+                body.world = undefined;
+                body.gameObject = undefined;
+            });
+
+            pending.clear();
+        }
     },
 
     /**
-    * A tween-like function that takes a starting velocity and some other factors and returns an altered velocity.
-    * Based on a function in Flixel by @ADAMATOMIC
-    *
-    * @method Phaser.Physics.Arcade#computeVelocity
-    * @param {number} axis - 0 for nothing, 1 for horizontal, 2 for vertical.
-    * @param {Phaser.Physics.Arcade.Body} body - The Body object to be updated.
-    * @param {number} velocity - Any component of velocity (e.g. 20).
-    * @param {number} acceleration - Rate at which the velocity is changing.
-    * @param {number} drag - Really kind of a deceleration, this is how much the velocity changes if Acceleration is not set.
-    * @param {number} [max=10000] - An absolute value cap for the velocity.
-    * @return {number} The altered Velocity value.
-    */
-    computeVelocity: function (axis, body, velocity, acceleration, drag, max) {
-
-        max = max || 10000;
-
-        if (axis == 1 && body.allowGravity)
+     * Calculates a Body's velocity and updates its position.
+     *
+     * @method Phaser.Physics.Arcade.World#updateMotion
+     * @since 3.0.0
+     *
+     * @param {Phaser.Physics.Arcade.Body} body - The Body to be updated.
+     * @param {number} delta - The delta value to be used in the motion calculations, in seconds.
+     */
+    updateMotion: function (body, delta)
+    {
+        if (body.allowRotation)
         {
-            velocity += (this.gravity.x + body.gravity.x) * this.game.time.physicsElapsed;
+            this.computeAngularVelocity(body, delta);
         }
-        else if (axis == 2 && body.allowGravity)
-        {
-            velocity += (this.gravity.y + body.gravity.y) * this.game.time.physicsElapsed;
-        }
+
+        this.computeVelocity(body, delta);
+    },
+
+    /**
+     * Calculates a Body's angular velocity.
+     *
+     * @method Phaser.Physics.Arcade.World#computeAngularVelocity
+     * @since 3.10.0
+     *
+     * @param {Phaser.Physics.Arcade.Body} body - The Body to compute the velocity for.
+     * @param {number} delta - The delta value to be used in the calculation, in seconds.
+     */
+    computeAngularVelocity: function (body, delta)
+    {
+        var velocity = body.angularVelocity;
+        var acceleration = body.angularAcceleration;
+        var drag = body.angularDrag;
+        var max = body.maxAngular;
 
         if (acceleration)
         {
-            velocity += acceleration * this.game.time.physicsElapsed;
+            velocity += acceleration * delta;
         }
-        else if (drag)
+        else if (body.allowDrag && drag)
         {
-            this._drag = drag * this.game.time.physicsElapsed;
+            drag *= delta;
 
-            if (velocity - this._drag > 0)
+            if (FuzzyGreaterThan(velocity - drag, 0, 0.1))
             {
-                velocity -= this._drag;
+                velocity -= drag;
             }
-            else if (velocity + this._drag < 0)
+            else if (FuzzyLessThan(velocity + drag, 0, 0.1))
             {
-                velocity += this._drag;
+                velocity += drag;
             }
             else
             {
@@ -322,245 +1201,823 @@ Phaser.Physics.Arcade.prototype = {
             }
         }
 
-        if (velocity > max)
-        {
-            velocity = max;
-        }
-        else if (velocity < -max)
-        {
-            velocity = -max;
-        }
+        velocity = Clamp(velocity, -max, max);
 
-        return velocity;
+        var velocityDelta = velocity - body.angularVelocity;
 
+        body.angularVelocity += velocityDelta;
+        body.rotation += (body.angularVelocity * delta);
     },
 
     /**
-    * Checks for overlaps between two game objects. The objects can be Sprites, Groups or Emitters.
-    * You can perform Sprite vs. Sprite, Sprite vs. Group and Group vs. Group overlap checks.
-    * Unlike collide the objects are NOT automatically separated or have any physics applied, they merely test for overlap results.
-    * Both the first and second parameter can be arrays of objects, of differing types.
-	* If two arrays are passed, the contents of the first parameter will be tested against all contents of the 2nd parameter.
-    * NOTE: This function is not recursive, and will not test against children of objects passed (i.e. Groups within Groups).
-    *
-    * @method Phaser.Physics.Arcade#overlap
-    * @param {Phaser.Sprite|Phaser.Group|Phaser.Particles.Emitter|array} object1 - The first object or array of objects to check. Can be Phaser.Sprite, Phaser.Group or Phaser.Particles.Emitter.
-    * @param {Phaser.Sprite|Phaser.Group|Phaser.Particles.Emitter|array} object2 - The second object or array of objects to check. Can be Phaser.Sprite, Phaser.Group or Phaser.Particles.Emitter.
-    * @param {function} [overlapCallback=null] - An optional callback function that is called if the objects overlap. The two objects will be passed to this function in the same order in which you specified them.
-    * @param {function} [processCallback=null] - A callback function that lets you perform additional checks against the two objects if they overlap. If this is set then overlapCallback will only be called if processCallback returns true.
-    * @param {object} [callbackContext] - The context in which to run the callbacks.
-    * @return {boolean} True if an overlap occurred otherwise false.
-    */
-    overlap: function (object1, object2, overlapCallback, processCallback, callbackContext) {
+     * Calculates a Body's per-axis velocity.
+     *
+     * @method Phaser.Physics.Arcade.World#computeVelocity
+     * @since 3.0.0
+     *
+     * @param {Phaser.Physics.Arcade.Body} body - The Body to compute the velocity for.
+     * @param {number} delta - The delta value to be used in the calculation, in seconds.
+     */
+    computeVelocity: function (body, delta)
+    {
+        var velocityX = body.velocity.x;
+        var accelerationX = body.acceleration.x;
+        var dragX = body.drag.x;
+        var maxX = body.maxVelocity.x;
 
-        overlapCallback = overlapCallback || null;
-        processCallback = processCallback || null;
-        callbackContext = callbackContext || overlapCallback;
+        var velocityY = body.velocity.y;
+        var accelerationY = body.acceleration.y;
+        var dragY = body.drag.y;
+        var maxY = body.maxVelocity.y;
 
-        this._result = false;
-        this._total = 0;
+        var speed = body.speed;
+        var maxSpeed = body.maxSpeed;
+        var allowDrag = body.allowDrag;
+        var useDamping = body.useDamping;
 
-        if (!Array.isArray(object1) && Array.isArray(object2))
+        if (body.allowGravity)
         {
-            for (var i = 0,  len = object2.length; i < len; i++)
-            {
-                this.collideHandler(object1, object2[i], overlapCallback, processCallback, callbackContext, true);
-            }
+            velocityX += (this.gravity.x + body.gravity.x) * delta;
+            velocityY += (this.gravity.y + body.gravity.y) * delta;
         }
-        else if (Array.isArray(object1) && !Array.isArray(object2))
+
+        if (accelerationX)
         {
-            for (var i = 0,  len = object1.length; i < len; i++)
-            {
-                this.collideHandler(object1[i], object2, overlapCallback, processCallback, callbackContext, true);
-            }
+            velocityX += accelerationX * delta;
         }
-        else if (Array.isArray(object1) && Array.isArray(object2))
+        else if (allowDrag && dragX)
         {
-            for (var i = 0,  len = object1.length; i < len; i++)
+            if (useDamping)
             {
-                for (var j = 0,  len2 = object2.length; j < len2; j++)
+                //  Damping based deceleration
+                dragX = Math.pow(dragX, delta);
+
+                velocityX *= dragX;
+
+                speed = Math.sqrt(velocityX * velocityX + velocityY * velocityY);
+
+                if (FuzzyEqual(speed, 0, 0.001))
                 {
-                    this.collideHandler(object1[i], object2[j], overlapCallback, processCallback, callbackContext, true);
+                    velocityX = 0;
                 }
             }
+            else
+            {
+                //  Linear deceleration
+                dragX *= delta;
+
+                if (FuzzyGreaterThan(velocityX - dragX, 0, 0.01))
+                {
+                    velocityX -= dragX;
+                }
+                else if (FuzzyLessThan(velocityX + dragX, 0, 0.01))
+                {
+                    velocityX += dragX;
+                }
+                else
+                {
+                    velocityX = 0;
+                }
+            }
+        }
+
+        if (accelerationY)
+        {
+            velocityY += accelerationY * delta;
+        }
+        else if (allowDrag && dragY)
+        {
+            if (useDamping)
+            {
+                //  Damping based deceleration
+                dragY = Math.pow(dragY, delta);
+
+                velocityY *= dragY;
+
+                speed = Math.sqrt(velocityX * velocityX + velocityY * velocityY);
+
+                if (FuzzyEqual(speed, 0, 0.001))
+                {
+                    velocityY = 0;
+                }
+            }
+            else
+            {
+                //  Linear deceleration
+                dragY *= delta;
+
+                if (FuzzyGreaterThan(velocityY - dragY, 0, 0.01))
+                {
+                    velocityY -= dragY;
+                }
+                else if (FuzzyLessThan(velocityY + dragY, 0, 0.01))
+                {
+                    velocityY += dragY;
+                }
+                else
+                {
+                    velocityY = 0;
+                }
+            }
+        }
+
+        velocityX = Clamp(velocityX, -maxX, maxX);
+        velocityY = Clamp(velocityY, -maxY, maxY);
+
+        body.velocity.set(velocityX, velocityY);
+
+        if (maxSpeed > -1 && body.velocity.length() > maxSpeed)
+        {
+            body.velocity.normalize().scale(maxSpeed);
+            speed = maxSpeed;
+        }
+
+        body.speed = speed;
+    },
+
+    /**
+     * Separates two Bodies.
+     *
+     * @method Phaser.Physics.Arcade.World#separate
+     * @fires Phaser.Physics.Arcade.Events#COLLIDE
+     * @fires Phaser.Physics.Arcade.Events#OVERLAP
+     * @since 3.0.0
+     *
+     * @param {Phaser.Physics.Arcade.Body} body1 - The first Body to be separated.
+     * @param {Phaser.Physics.Arcade.Body} body2 - The second Body to be separated.
+     * @param {Phaser.Types.Physics.Arcade.ArcadePhysicsCallback} [processCallback] - The process callback.
+     * @param {*} [callbackContext] - The context in which to invoke the callback.
+     * @param {boolean} [overlapOnly] - If this is a collide or overlap check?
+     *
+     * @return {boolean} True if separation occurred, otherwise false.
+     */
+    separate: function (body1, body2, processCallback, callbackContext, overlapOnly)
+    {
+        var overlapX;
+        var overlapY;
+
+        var result = false;
+        var runSeparation = true;
+
+        if (
+            !body1.enable ||
+            !body2.enable ||
+            body1.checkCollision.none ||
+            body2.checkCollision.none ||
+            !this.intersects(body1, body2) ||
+            (body1.collisionMask & body2.collisionCategory) === 0 ||
+            (body2.collisionMask & body1.collisionCategory) === 0)
+        {
+            return result;
+        }
+
+        //  They overlap. Is there a custom process callback? If it returns true then we can carry on, otherwise we should abort.
+        if (processCallback && processCallback.call(callbackContext, (body1.gameObject || body1), (body2.gameObject || body2)) === false)
+        {
+            return result;
+        }
+
+        //  Circle vs. Circle, or Circle vs. Rect
+        if (body1.isCircle || body2.isCircle)
+        {
+            var circleResults = this.separateCircle(body1, body2, overlapOnly);
+
+            if (circleResults.result)
+            {
+                //  We got a satisfactory result from the separateCircle method
+                result = true;
+                runSeparation = false;
+            }
+            else
+            {
+                //  Further processing required
+                overlapX = circleResults.x;
+                overlapY = circleResults.y;
+                runSeparation = true;
+            }
+        }
+
+        if (runSeparation)
+        {
+            var resultX = false;
+            var resultY = false;
+            var bias = this.OVERLAP_BIAS;
+
+            //  Do we separate on x first or y first or both?
+            if (overlapOnly)
+            {
+                //  No separation but we need to calculate overlapX, overlapY, etc.
+                resultX = SeparateX(body1, body2, overlapOnly, bias, overlapX);
+                resultY = SeparateY(body1, body2, overlapOnly, bias, overlapY);
+            }
+            else if (this.forceX || Math.abs(this.gravity.y + body1.gravity.y) < Math.abs(this.gravity.x + body1.gravity.x))
+            {
+                resultX = SeparateX(body1, body2, overlapOnly, bias, overlapX);
+
+                //  Are they still intersecting? Let's do the other axis then
+                if (this.intersects(body1, body2))
+                {
+                    resultY = SeparateY(body1, body2, overlapOnly, bias, overlapY);
+                }
+            }
+            else
+            {
+                resultY = SeparateY(body1, body2, overlapOnly, bias, overlapY);
+
+                //  Are they still intersecting? Let's do the other axis then
+                if (this.intersects(body1, body2))
+                {
+                    resultX = SeparateX(body1, body2, overlapOnly, bias, overlapX);
+                }
+            }
+
+            result = (resultX || resultY);
+        }
+
+        if (result)
+        {
+            if (overlapOnly)
+            {
+                if (body1.onOverlap || body2.onOverlap)
+                {
+                    this.emit(Events.OVERLAP, body1.gameObject, body2.gameObject, body1, body2);
+                }
+            }
+            else if (body1.onCollide || body2.onCollide)
+            {
+                this.emit(Events.COLLIDE, body1.gameObject, body2.gameObject, body1, body2);
+            }
+        }
+
+        return result;
+    },
+
+    /**
+     * Separates two Bodies, when both are circular.
+     *
+     * @method Phaser.Physics.Arcade.World#separateCircle
+     * @fires Phaser.Physics.Arcade.Events#COLLIDE
+     * @fires Phaser.Physics.Arcade.Events#OVERLAP
+     * @since 3.0.0
+     *
+     * @param {Phaser.Physics.Arcade.Body} body1 - The first Body to be separated.
+     * @param {Phaser.Physics.Arcade.Body} body2 - The second Body to be separated.
+     * @param {boolean} [overlapOnly] - If this is a collide or overlap check?
+     *
+     * @return {boolean} True if separation occurred, otherwise false.
+     */
+    separateCircle: function (body1, body2, overlapOnly)
+    {
+        //  Set the AABB overlap, blocked and touching values into the bodies (we don't use the return values here)
+        GetOverlapX(body1, body2, false, 0);
+        GetOverlapY(body1, body2, false, 0);
+
+        var body1IsCircle = body1.isCircle;
+        var body2IsCircle = body2.isCircle;
+        var body1Center = body1.center;
+        var body2Center = body2.center;
+        var body1Immovable = body1.immovable;
+        var body2Immovable = body2.immovable;
+        var body1Velocity = body1.velocity;
+        var body2Velocity = body2.velocity;
+
+        var overlap = 0;
+        var twoCircles = true;
+
+        if (body1IsCircle !== body2IsCircle)
+        {
+            twoCircles = false;
+
+            var circleX = body1Center.x;
+            var circleY = body1Center.y;
+            var circleRadius = body1.halfWidth;
+
+            var rectX = body2.position.x;
+            var rectY = body2.position.y;
+            var rectRight = body2.right;
+            var rectBottom = body2.bottom;
+
+            if (body2IsCircle)
+            {
+                circleX = body2Center.x;
+                circleY = body2Center.y;
+                circleRadius = body2.halfWidth;
+
+                rectX = body1.position.x;
+                rectY = body1.position.y;
+                rectRight = body1.right;
+                rectBottom = body1.bottom;
+            }
+
+            if (circleY < rectY)
+            {
+                if (circleX < rectX)
+                {
+                    overlap = DistanceBetween(circleX, circleY, rectX, rectY) - circleRadius;
+                }
+                else if (circleX > rectRight)
+                {
+                    overlap = DistanceBetween(circleX, circleY, rectRight, rectY) - circleRadius;
+                }
+            }
+            else if (circleY > rectBottom)
+            {
+                if (circleX < rectX)
+                {
+                    overlap = DistanceBetween(circleX, circleY, rectX, rectBottom) - circleRadius;
+                }
+                else if (circleX > rectRight)
+                {
+                    overlap = DistanceBetween(circleX, circleY, rectRight, rectBottom) - circleRadius;
+                }
+            }
+
+            //  If a collision occurs in the corner points of the rectangle
+            //  then the bodies behave like circles
+            overlap *= -1;
         }
         else
         {
-            this.collideHandler(object1, object2, overlapCallback, processCallback, callbackContext, true);
+            overlap = (body1.halfWidth + body2.halfWidth) - DistanceBetweenPoints(body1Center, body2Center);
         }
 
-        return (this._total > 0);
+        body1.overlapR = overlap;
+        body2.overlapR = overlap;
 
-    },
+        var angle = AngleBetweenPoints(body1Center, body2Center);
+        var overlapX = (overlap + MATH_CONST.EPSILON) * Math.cos(angle);
+        var overlapY = (overlap + MATH_CONST.EPSILON) * Math.sin(angle);
 
-    /**
-    * Checks for collision between two game objects. You can perform Sprite vs. Sprite, Sprite vs. Group, Group vs. Group, Sprite vs. Tilemap Layer or Group vs. Tilemap Layer collisions.
-    * Both the first and second parameter can be arrays of objects, of differing types.
-	* If two arrays are passed, the contents of the first parameter will be tested against all contents of the 2nd parameter.
-    * The objects are also automatically separated. If you don't require separation then use ArcadePhysics.overlap instead.
-    * An optional processCallback can be provided. If given this function will be called when two sprites are found to be colliding. It is called before any separation takes place,
-    * giving you the chance to perform additional checks. If the function returns true then the collision and separation is carried out. If it returns false it is skipped.
-    * The collideCallback is an optional function that is only called if two sprites collide. If a processCallback has been set then it needs to return true for collideCallback to be called.
-    * NOTE: This function is not recursive, and will not test against children of objects passed (i.e. Groups or Tilemaps within other Groups).
-    *
-    * @method Phaser.Physics.Arcade#collide
-    * @param {Phaser.Sprite|Phaser.Group|Phaser.Particles.Emitter|Phaser.TilemapLayer|array} object1 - The first object or array of objects to check. Can be Phaser.Sprite, Phaser.Group, Phaser.Particles.Emitter, or Phaser.TilemapLayer.
-    * @param {Phaser.Sprite|Phaser.Group|Phaser.Particles.Emitter|Phaser.TilemapLayer|array} object2 - The second object or array of objects to check. Can be Phaser.Sprite, Phaser.Group, Phaser.Particles.Emitter or Phaser.TilemapLayer.
-    * @param {function} [collideCallback=null] - An optional callback function that is called if the objects collide. The two objects will be passed to this function in the same order in which you specified them, unless you are colliding Group vs. Sprite, in which case Sprite will always be the first parameter.
-    * @param {function} [processCallback=null] - A callback function that lets you perform additional checks against the two objects if they overlap. If this is set then collision will only happen if processCallback returns true. The two objects will be passed to this function in the same order in which you specified them.
-    * @param {object} [callbackContext] - The context in which to run the callbacks.
-    * @return {boolean} True if a collision occurred otherwise false.
-    */
-    collide: function (object1, object2, collideCallback, processCallback, callbackContext) {
+        var results = { overlap: overlap, result: false, x: overlapX, y: overlapY };
 
-        collideCallback = collideCallback || null;
-        processCallback = processCallback || null;
-        callbackContext = callbackContext || collideCallback;
-
-        this._result = false;
-        this._total = 0;
-
-        if (!Array.isArray(object1) && Array.isArray(object2))
+        //  We know the AABBs already intersect before we enter this method
+        if (overlapOnly && (!twoCircles || (twoCircles && overlap !== 0)))
         {
-            for (var i = 0,  len = object2.length; i < len; i++)
-            {
-                this.collideHandler(object1, object2[i], collideCallback, processCallback, callbackContext, false);
-            }
+            //  Now we know the rect vs circle overlaps, or two circles do
+            results.result = true;
+
+            return results;
         }
-        else if (Array.isArray(object1) && !Array.isArray(object2))
+
+        //  Can't separate (in this method):
+        //  Two immovable bodies
+        //  A body with its own custom separation logic
+        //  A circle vs. a rect with a face-on collision
+        if ((!twoCircles && overlap === 0) || (body1Immovable && body2Immovable) || body1.customSeparateX || body2.customSeparateX)
         {
-            for (var i = 0,  len = object1.length; i < len; i++)
-            {
-                this.collideHandler(object1[i], object2, collideCallback, processCallback, callbackContext, false);
-            }
+            //  Let SeparateX / SeparateY handle this
+            results.x = undefined;
+            results.y = undefined;
+
+            return results;
         }
-        else if (Array.isArray(object1) && Array.isArray(object2))
+
+        //  If we get this far we either have circle vs. circle
+        //  or circle vs. rect with corner collision
+
+        var deadlock = (!body1.pushable && !body2.pushable);
+
+        if (twoCircles)
         {
-            for (var i = 0,  len1 = object1.length; i < len1; i++)
+            var dx = body1Center.x - body2Center.x;
+            var dy = body1Center.y - body2Center.y;
+            var d = Math.sqrt(Math.pow(dx, 2) + Math.pow(dy, 2));
+            var nx = ((body2Center.x - body1Center.x) / d) || 0;
+            var ny = ((body2Center.y - body1Center.y) / d) || 0;
+            var p = 2 * (body1Velocity.x * nx + body1Velocity.y * ny - body2Velocity.x * nx - body2Velocity.y * ny) / (body1.mass + body2.mass);
+
+            if (body1Immovable || body2Immovable || !body1.pushable || !body2.pushable)
             {
-                for (var j = 0,  len2 = object2.length; j < len2; j++)
-                {
-                    this.collideHandler(object1[i], object2[j], collideCallback, processCallback, callbackContext, false);
-                }
+                p *= 2;
             }
+
+            if (!body1Immovable && body1.pushable)
+            {
+                body1Velocity.x = (body1Velocity.x - p / body1.mass * nx);
+                body1Velocity.y = (body1Velocity.y - p / body1.mass * ny);
+                body1Velocity.multiply(body1.bounce);
+            }
+
+            if (!body2Immovable && body2.pushable)
+            {
+                body2Velocity.x = (body2Velocity.x + p / body2.mass * nx);
+                body2Velocity.y = (body2Velocity.y + p / body2.mass * ny);
+                body2Velocity.multiply(body2.bounce);
+            }
+
+            if (!body1Immovable && !body2Immovable)
+            {
+                overlapX *= 0.5;
+                overlapY *= 0.5;
+            }
+
+            if (!body1Immovable || body1.pushable || deadlock)
+            {
+                body1.x -= overlapX;
+                body1.y -= overlapY;
+
+                body1.updateCenter();
+            }
+
+            if (!body2Immovable || body2.pushable || deadlock)
+            {
+                body2.x += overlapX;
+                body2.y += overlapY;
+
+                body2.updateCenter();
+            }
+
+            results.result = true;
         }
         else
         {
-            this.collideHandler(object1, object2, collideCallback, processCallback, callbackContext, false);
+            //  Circle vs. Rect
+            //  We'll only move the circle (if we can) and let
+            //  the runSeparation handle the rectangle
+
+            if (!body1Immovable && (body1.pushable || deadlock))
+            {
+                body1.x -= overlapX;
+                body1.y -= overlapY;
+
+                body1.updateCenter();
+            }
+
+            if (!body2Immovable || body2.pushable || deadlock)
+            {
+                body2.x += overlapX;
+                body2.y += overlapY;
+
+                body2.updateCenter();
+            }
+
+            //  Let SeparateX / SeparateY handle this further
+            results.x = undefined;
+            results.y = undefined;
         }
 
-        return (this._total > 0);
-
+        return results;
     },
 
     /**
-    * Internal collision handler.
-    *
-    * @method Phaser.Physics.Arcade#collideHandler
-    * @private
-    * @param {Phaser.Sprite|Phaser.Group|Phaser.Particles.Emitter|Phaser.TilemapLayer} object1 - The first object to check. Can be an instance of Phaser.Sprite, Phaser.Group, Phaser.Particles.Emitter, or Phaser.TilemapLayer.
-    * @param {Phaser.Sprite|Phaser.Group|Phaser.Particles.Emitter|Phaser.TilemapLayer} object2 - The second object to check. Can be an instance of Phaser.Sprite, Phaser.Group, Phaser.Particles.Emitter or Phaser.TilemapLayer. Can also be an array of objects to check.
-    * @param {function} collideCallback - An optional callback function that is called if the objects collide. The two objects will be passed to this function in the same order in which you specified them.
-    * @param {function} processCallback - A callback function that lets you perform additional checks against the two objects if they overlap. If this is set then collision will only happen if processCallback returns true. The two objects will be passed to this function in the same order in which you specified them.
-    * @param {object} callbackContext - The context in which to run the callbacks.
-    * @param {boolean} overlapOnly - Just run an overlap or a full collision.
-    */
-    collideHandler: function (object1, object2, collideCallback, processCallback, callbackContext, overlapOnly) {
-
-        //  Only collide valid objects
-        if (typeof object2 === 'undefined' && (object1.type === Phaser.GROUP || object1.type === Phaser.EMITTER))
-        {
-            this.collideGroupVsSelf(object1, collideCallback, processCallback, callbackContext, overlapOnly);
-            return;
-        }
-
-        if (object1 && object2 && object1.exists && object2.exists)
-        {
-            //  SPRITES
-            if (object1.type == Phaser.SPRITE || object1.type == Phaser.TILESPRITE)
-            {
-                if (object2.type == Phaser.SPRITE || object2.type == Phaser.TILESPRITE)
-                {
-                    this.collideSpriteVsSprite(object1, object2, collideCallback, processCallback, callbackContext, overlapOnly);
-                }
-                else if (object2.type == Phaser.GROUP || object2.type == Phaser.EMITTER)
-                {
-                    this.collideSpriteVsGroup(object1, object2, collideCallback, processCallback, callbackContext, overlapOnly);
-                }
-                else if (object2.type == Phaser.TILEMAPLAYER)
-                {
-                    this.collideSpriteVsTilemapLayer(object1, object2, collideCallback, processCallback, callbackContext);
-                }
-            }
-            //  GROUPS
-            else if (object1.type == Phaser.GROUP)
-            {
-                if (object2.type == Phaser.SPRITE || object2.type == Phaser.TILESPRITE)
-                {
-                    this.collideSpriteVsGroup(object2, object1, collideCallback, processCallback, callbackContext, overlapOnly);
-                }
-                else if (object2.type == Phaser.GROUP || object2.type == Phaser.EMITTER)
-                {
-                    this.collideGroupVsGroup(object1, object2, collideCallback, processCallback, callbackContext, overlapOnly);
-                }
-                else if (object2.type == Phaser.TILEMAPLAYER)
-                {
-                    this.collideGroupVsTilemapLayer(object1, object2, collideCallback, processCallback, callbackContext);
-                }
-            }
-            //  TILEMAP LAYERS
-            else if (object1.type == Phaser.TILEMAPLAYER)
-            {
-                if (object2.type == Phaser.SPRITE || object2.type == Phaser.TILESPRITE)
-                {
-                    this.collideSpriteVsTilemapLayer(object2, object1, collideCallback, processCallback, callbackContext);
-                }
-                else if (object2.type == Phaser.GROUP || object2.type == Phaser.EMITTER)
-                {
-                    this.collideGroupVsTilemapLayer(object2, object1, collideCallback, processCallback, callbackContext);
-                }
-            }
-            //  EMITTER
-            else if (object1.type == Phaser.EMITTER)
-            {
-                if (object2.type == Phaser.SPRITE || object2.type == Phaser.TILESPRITE)
-                {
-                    this.collideSpriteVsGroup(object2, object1, collideCallback, processCallback, callbackContext, overlapOnly);
-                }
-                else if (object2.type == Phaser.GROUP || object2.type == Phaser.EMITTER)
-                {
-                    this.collideGroupVsGroup(object1, object2, collideCallback, processCallback, callbackContext, overlapOnly);
-                }
-                else if (object2.type == Phaser.TILEMAPLAYER)
-                {
-                    this.collideGroupVsTilemapLayer(object1, object2, collideCallback, processCallback, callbackContext);
-                }
-            }
-        }
-
-    },
-
-    /**
-    * An internal function. Use Phaser.Physics.Arcade.collide instead.
-    *
-    * @method Phaser.Physics.Arcade#collideSpriteVsSprite
-    * @private
-    * @param {Phaser.Sprite} sprite1 - The first sprite to check.
-    * @param {Phaser.Sprite} sprite2 - The second sprite to check.
-    * @param {function} collideCallback - An optional callback function that is called if the objects collide. The two objects will be passed to this function in the same order in which you specified them.
-    * @param {function} processCallback - A callback function that lets you perform additional checks against the two objects if they overlap. If this is set then collision will only happen if processCallback returns true. The two objects will be passed to this function in the same order in which you specified them.
-    * @param {object} callbackContext - The context in which to run the callbacks.
-    * @param {boolean} overlapOnly - Just run an overlap or a full collision.
-    * @return {boolean} True if there was a collision, otherwise false.
-    */
-    collideSpriteVsSprite: function (sprite1, sprite2, collideCallback, processCallback, callbackContext, overlapOnly) {
-
-        if (!sprite1.body || !sprite2.body)
+     * Checks to see if two Bodies intersect at all.
+     *
+     * @method Phaser.Physics.Arcade.World#intersects
+     * @since 3.0.0
+     *
+     * @param {Phaser.Physics.Arcade.Body} body1 - The first body to check.
+     * @param {Phaser.Physics.Arcade.Body} body2 - The second body to check.
+     *
+     * @return {boolean} True if the two bodies intersect, otherwise false.
+     */
+    intersects: function (body1, body2)
+    {
+        if (body1 === body2)
         {
             return false;
         }
 
-        if (this.separate(sprite1.body, sprite2.body, processCallback, callbackContext, overlapOnly))
+        if (!body1.isCircle && !body2.isCircle)
+        {
+            //  Rect vs. Rect
+            return !(
+                body1.right <= body2.left ||
+                body1.bottom <= body2.top ||
+                body1.left >= body2.right ||
+                body1.top >= body2.bottom
+            );
+        }
+        else if (body1.isCircle)
+        {
+            if (body2.isCircle)
+            {
+                //  Circle vs. Circle
+                return DistanceBetweenPoints(body1.center, body2.center) <= (body1.halfWidth + body2.halfWidth);
+            }
+            else
+            {
+                //  Circle vs. Rect
+                return this.circleBodyIntersects(body1, body2);
+            }
+        }
+        else
+        {
+            //  Rect vs. Circle
+            return this.circleBodyIntersects(body2, body1);
+        }
+    },
+
+    /**
+     * Tests if a circular Body intersects with another Body.
+     *
+     * @method Phaser.Physics.Arcade.World#circleBodyIntersects
+     * @since 3.0.0
+     *
+     * @param {Phaser.Physics.Arcade.Body} circle - The circular body to test.
+     * @param {Phaser.Physics.Arcade.Body} body - The rectangular body to test.
+     *
+     * @return {boolean} True if the two bodies intersect, otherwise false.
+     */
+    circleBodyIntersects: function (circle, body)
+    {
+        var x = Clamp(circle.center.x, body.left, body.right);
+        var y = Clamp(circle.center.y, body.top, body.bottom);
+
+        var dx = (circle.center.x - x) * (circle.center.x - x);
+        var dy = (circle.center.y - y) * (circle.center.y - y);
+
+        return (dx + dy) <= (circle.halfWidth * circle.halfWidth);
+    },
+
+    /**
+     * Tests if Game Objects overlap.
+     *
+     * See details in {@link Phaser.Physics.Arcade.World#collide}.
+     *
+     * @method Phaser.Physics.Arcade.World#overlap
+     * @since 3.0.0
+     *
+     * @param {Phaser.Types.Physics.Arcade.ArcadeColliderType} object1 - The first object or array of objects to check.
+     * @param {Phaser.Types.Physics.Arcade.ArcadeColliderType} [object2] - The second object or array of objects to check, or `undefined`.
+     * @param {Phaser.Types.Physics.Arcade.ArcadePhysicsCallback} [overlapCallback] - An optional callback function that is called if the objects overlap.
+     * @param {Phaser.Types.Physics.Arcade.ArcadePhysicsCallback} [processCallback] - An optional callback function that lets you perform additional checks against the two objects if they overlap. If this is set then `overlapCallback` will only be called if this callback returns `true`.
+     * @param {*} [callbackContext] - The context in which to run the callbacks.
+     *
+     * @return {boolean} True if at least one Game Object overlaps another.
+     *
+     * @see Phaser.Physics.Arcade.World#collide
+     */
+    overlap: function (object1, object2, overlapCallback, processCallback, callbackContext)
+    {
+        if (overlapCallback === undefined) { overlapCallback = null; }
+        if (processCallback === undefined) { processCallback = null; }
+        if (callbackContext === undefined) { callbackContext = overlapCallback; }
+
+        return this.collideObjects(object1, object2, overlapCallback, processCallback, callbackContext, true);
+    },
+
+    /**
+     * Performs a collision check and separation between the two physics enabled objects given, which can be single
+     * Game Objects, arrays of Game Objects, Physics Groups, arrays of Physics Groups or normal Groups.
+     *
+     * If you don't require separation then use {@link Phaser.Physics.Arcade.World#overlap} instead.
+     *
+     * If two Groups or arrays are passed, each member of one will be tested against each member of the other.
+     *
+     * If **only** one Group is passed (as `object1`), each member of the Group will be collided against the other members.
+     *
+     * If **only** one Array is passed, the array is iterated and every element in it is tested against the others.
+     *
+     * Two callbacks can be provided; they receive the colliding game objects as arguments.
+     * If an overlap is detected, the `processCallback` is called first. It can cancel the collision by returning false.
+     * Next the objects are separated and `collideCallback` is invoked.
+     *
+     * Arcade Physics uses the Projection Method of collision resolution and separation. While it's fast and suitable
+     * for 'arcade' style games it lacks stability when multiple objects are in close proximity or resting upon each other.
+     * The separation that stops two objects penetrating may create a new penetration against a different object. If you
+     * require a high level of stability please consider using an alternative physics system, such as Matter.js.
+     *
+     * @method Phaser.Physics.Arcade.World#collide
+     * @since 3.0.0
+     *
+     * @param {Phaser.Types.Physics.Arcade.ArcadeColliderType} object1 - The first object or array of objects to check.
+     * @param {Phaser.Types.Physics.Arcade.ArcadeColliderType} [object2] - The second object or array of objects to check, or `undefined`.
+     * @param {Phaser.Types.Physics.Arcade.ArcadePhysicsCallback} [collideCallback] - An optional callback function that is called if the objects collide.
+     * @param {Phaser.Types.Physics.Arcade.ArcadePhysicsCallback} [processCallback] - An optional callback function that lets you perform additional checks against the two objects if they collide. If this is set then `collideCallback` will only be called if this callback returns `true`.
+     * @param {any} [callbackContext] - The context in which to run the callbacks.
+     *
+     * @return {boolean} `true` if any overlapping Game Objects were separated, otherwise `false`.
+     */
+    collide: function (object1, object2, collideCallback, processCallback, callbackContext)
+    {
+        if (collideCallback === undefined) { collideCallback = null; }
+        if (processCallback === undefined) { processCallback = null; }
+        if (callbackContext === undefined) { callbackContext = collideCallback; }
+
+        return this.collideObjects(object1, object2, collideCallback, processCallback, callbackContext, false);
+    },
+
+    /**
+     * Internal helper function. Please use Phaser.Physics.Arcade.World#collide instead.
+     *
+     * @method Phaser.Physics.Arcade.World#collideObjects
+     * @private
+     * @since 3.0.0
+     *
+     * @param {Phaser.Types.Physics.Arcade.ArcadeColliderType} object1 - The first object to check for collision.
+     * @param {Phaser.Types.Physics.Arcade.ArcadeColliderType} [object2] - The second object to check for collision.
+     * @param {Phaser.Types.Physics.Arcade.ArcadePhysicsCallback} collideCallback - The callback to invoke when the two objects collide.
+     * @param {Phaser.Types.Physics.Arcade.ArcadePhysicsCallback} processCallback - The callback to invoke when the two objects collide. Must return a boolean.
+     * @param {any} callbackContext - The scope in which to call the callbacks.
+     * @param {boolean} overlapOnly - Whether this is a collision or overlap check.
+     *
+     * @return {boolean} True if any objects overlap (with `overlapOnly`); or true if any overlapping objects were separated.
+     */
+    collideObjects: function (object1, object2, collideCallback, processCallback, callbackContext, overlapOnly)
+    {
+        var i;
+        var j;
+
+        if (object1.isParent && (object1.physicsType === undefined || object2 === undefined || object1 === object2))
+        {
+            object1 = Array.from(object1.children);
+        }
+
+        if (object2 && object2.isParent && object2.physicsType === undefined)
+        {
+            object2 = Array.from(object2.children);
+        }
+
+        var object1isArray = Array.isArray(object1);
+        var object2isArray = Array.isArray(object2);
+
+        this._total = 0;
+
+        if (!object1isArray && !object2isArray)
+        {
+            //  Neither of them are arrays - do this first as it's the most common use-case
+            this.collideHandler(object1, object2, collideCallback, processCallback, callbackContext, overlapOnly);
+        }
+        else if (!object1isArray && object2isArray)
+        {
+            //  Object 2 is an Array
+            for (i = 0; i < object2.length; i++)
+            {
+                this.collideHandler(object1, object2[i], collideCallback, processCallback, callbackContext, overlapOnly);
+            }
+        }
+        else if (object1isArray && !object2isArray)
+        {
+            //  Object 1 is an Array
+            if (!object2)
+            {
+                //  Special case for array vs. self
+                for (i = 0; i < object1.length; i++)
+                {
+                    var child = object1[i];
+
+                    for (j = i + 1; j < object1.length; j++)
+                    {
+                        if (i === j)
+                        {
+                            continue;
+                        }
+
+                        this.collideHandler(child, object1[j], collideCallback, processCallback, callbackContext, overlapOnly);
+                    }
+                }
+            }
+            else
+            {
+                for (i = 0; i < object1.length; i++)
+                {
+                    this.collideHandler(object1[i], object2, collideCallback, processCallback, callbackContext, overlapOnly);
+                }
+            }
+        }
+        else
+        {
+            //  They're both arrays
+            for (i = 0; i < object1.length; i++)
+            {
+                for (j = 0; j < object2.length; j++)
+                {
+                    this.collideHandler(object1[i], object2[j], collideCallback, processCallback, callbackContext, overlapOnly);
+                }
+            }
+        }
+
+        return (this._total > 0);
+    },
+
+    /**
+     * Internal helper function. Please use Phaser.Physics.Arcade.World#collide and Phaser.Physics.Arcade.World#overlap instead.
+     *
+     * @method Phaser.Physics.Arcade.World#collideHandler
+     * @private
+     * @since 3.0.0
+     *
+     * @param {Phaser.Types.Physics.Arcade.ArcadeColliderType} object1 - The first object or array of objects to check.
+     * @param {Phaser.Types.Physics.Arcade.ArcadeColliderType} object2 - The second object or array of objects to check, or `undefined`.
+     * @param {Phaser.Types.Physics.Arcade.ArcadePhysicsCallback} collideCallback - An optional callback function that is called if the objects collide.
+     * @param {Phaser.Types.Physics.Arcade.ArcadePhysicsCallback} processCallback - An optional callback function that lets you perform additional checks against the two objects if they collide. If this is set then `collideCallback` will only be called if this callback returns `true`.
+     * @param {any} callbackContext - The context in which to run the callbacks.
+     * @param {boolean} overlapOnly - Whether this is a collision or overlap check.
+     *
+     * @return {boolean} True if any objects overlap (with `overlapOnly`); or true if any overlapping objects were separated.
+     */
+    collideHandler: function (object1, object2, collideCallback, processCallback, callbackContext, overlapOnly)
+    {
+        //  Collide Group with Self
+        //  Only collide valid objects
+        if (object2 === undefined && object1.isParent)
+        {
+            return this.collideGroupVsGroup(object1, object1, collideCallback, processCallback, callbackContext, overlapOnly);
+        }
+
+        //  If neither of the objects are set then bail out
+        if (!object1 || !object2)
+        {
+            return false;
+        }
+
+        //  SPRITE
+        if (object1.body || object1.isBody)
+        {
+            if (object2.body || object2.isBody)
+            {
+                return this.collideSpriteVsSprite(object1, object2, collideCallback, processCallback, callbackContext, overlapOnly);
+            }
+            else if (object2.isParent)
+            {
+                return this.collideSpriteVsGroup(object1, object2, collideCallback, processCallback, callbackContext, overlapOnly);
+            }
+            else if (object2.isTilemap)
+            {
+                return this.collideSpriteVsTilemapLayer(object1, object2, collideCallback, processCallback, callbackContext, overlapOnly);
+            }
+        }
+
+        //  GROUPS
+        else if (object1.isParent)
+        {
+            if (object2.body || object2.isBody)
+            {
+                return this.collideSpriteVsGroup(object2, object1, collideCallback, processCallback, callbackContext, overlapOnly);
+            }
+            else if (object2.isParent)
+            {
+                return this.collideGroupVsGroup(object1, object2, collideCallback, processCallback, callbackContext, overlapOnly);
+            }
+            else if (object2.isTilemap)
+            {
+                return this.collideGroupVsTilemapLayer(object1, object2, collideCallback, processCallback, callbackContext, overlapOnly);
+            }
+        }
+
+        //  TILEMAP LAYERS
+        else if (object1.isTilemap)
+        {
+            if (object2.body || object2.isBody)
+            {
+                return this.collideSpriteVsTilemapLayer(object2, object1, collideCallback, processCallback, callbackContext, overlapOnly);
+            }
+            else if (object2.isParent)
+            {
+                return this.collideGroupVsTilemapLayer(object2, object1, collideCallback, processCallback, callbackContext, overlapOnly);
+            }
+        }
+    },
+
+    /**
+     * Checks if the two given Arcade Physics bodies will collide, or not,
+     * based on their collision mask and collision categories.
+     *
+     * @method Phaser.Physics.Arcade.World#canCollide
+     * @since 3.70.0
+     *
+     * @param {Phaser.Types.Physics.Arcade.ArcadeColliderType} body1 - The first body to check.
+     * @param {Phaser.Types.Physics.Arcade.ArcadeColliderType} body2 - The second body to check.
+     *
+     * @return {boolean} True if the two bodies will collide, otherwise false.
+     */
+    canCollide: function (body1, body2)
+    {
+        return (
+            (body1 && body2) &&
+            (body1.collisionMask & body2.collisionCategory) !== 0 &&
+            (body2.collisionMask & body1.collisionCategory) !== 0
+        );
+    },
+
+    /**
+     * Internal handler for Sprite vs. Sprite collisions.
+     * Please use Phaser.Physics.Arcade.World#collide instead.
+     *
+     * @method Phaser.Physics.Arcade.World#collideSpriteVsSprite
+     * @private
+     * @since 3.0.0
+     *
+     * @param {Phaser.GameObjects.GameObject} sprite1 - The first object to check for collision.
+     * @param {Phaser.GameObjects.GameObject} sprite2 - The second object to check for collision.
+     * @param {Phaser.Types.Physics.Arcade.ArcadePhysicsCallback} [collideCallback] - An optional callback function that is called if the objects collide.
+     * @param {Phaser.Types.Physics.Arcade.ArcadePhysicsCallback} [processCallback] - An optional callback function that lets you perform additional checks against the two objects if they collide. If this is set then `collideCallback` will only be called if this callback returns `true`.
+     * @param {any} [callbackContext] - The context in which to run the callbacks.
+     * @param {boolean} overlapOnly - Whether this is a collision or overlap check.
+     *
+     * @return {boolean} True if any objects overlap (with `overlapOnly`); or true if any overlapping objects were separated.
+     */
+    collideSpriteVsSprite: function (sprite1, sprite2, collideCallback, processCallback, callbackContext, overlapOnly)
+    {
+        var body1 = (sprite1.isBody) ? sprite1 : sprite1.body;
+        var body2 = (sprite2.isBody) ? sprite2 : sprite2.body;
+
+        if (!this.canCollide(body1, body2))
+        {
+            return false;
+        }
+
+        if (this.separate(body1, body2, processCallback, callbackContext, overlapOnly))
         {
             if (collideCallback)
             {
@@ -571,1251 +2028,483 @@ Phaser.Physics.Arcade.prototype = {
         }
 
         return true;
-
     },
 
     /**
-    * An internal function. Use Phaser.Physics.Arcade.collide instead.
-    *
-    * @method Phaser.Physics.Arcade#collideSpriteVsGroup
-    * @private
-    * @param {Phaser.Sprite} sprite - The sprite to check.
-    * @param {Phaser.Group} group - The Group to check.
-    * @param {function} collideCallback - An optional callback function that is called if the objects collide. The two objects will be passed to this function in the same order in which you specified them.
-    * @param {function} processCallback - A callback function that lets you perform additional checks against the two objects if they overlap. If this is set then collision will only happen if processCallback returns true. The two objects will be passed to this function in the same order in which you specified them.
-    * @param {object} callbackContext - The context in which to run the callbacks.
-    * @param {boolean} overlapOnly - Just run an overlap or a full collision.
-    */
-    collideSpriteVsGroup: function (sprite, group, collideCallback, processCallback, callbackContext, overlapOnly) {
+     * Internal handler for Sprite vs. Group collisions.
+     * Please use Phaser.Physics.Arcade.World#collide instead.
+     *
+     * @method Phaser.Physics.Arcade.World#collideSpriteVsGroup
+     * @private
+     * @since 3.0.0
+     *
+     * @param {Phaser.GameObjects.GameObject} sprite - The first object to check for collision.
+     * @param {Phaser.GameObjects.Group} group - The second object to check for collision.
+     * @param {Phaser.Types.Physics.Arcade.ArcadePhysicsCallback} collideCallback - The callback to invoke when the two objects collide.
+     * @param {Phaser.Types.Physics.Arcade.ArcadePhysicsCallback} processCallback - The callback to invoke when the two objects collide. Must return a boolean.
+     * @param {any} callbackContext - The scope in which to call the callbacks.
+     * @param {boolean} overlapOnly - Whether this is a collision or overlap check.
+     */
+    collideSpriteVsGroup: function (sprite, group, collideCallback, processCallback, callbackContext, overlapOnly)
+    {
+        var bodyA = (sprite.isBody) ? sprite : sprite.body;
 
-        if (group.length === 0 || !sprite.body)
+        if (group.getLength() === 0 || !bodyA || !bodyA.enable || bodyA.checkCollision.none || !this.canCollide(bodyA, group))
         {
             return;
         }
 
-        if (sprite.body.skipQuadTree || this.skipQuadTree)
+        //  Does sprite collide with anything?
+
+        var i;
+        var len;
+        var bodyB;
+
+        if (this.useTree || group.physicsType === CONST.STATIC_BODY)
         {
-            for (var i = 0, len = group.children.length; i < len; i++)
+            var minMax = this.treeMinMax;
+
+            minMax.minX = bodyA.left;
+            minMax.minY = bodyA.top;
+            minMax.maxX = bodyA.right;
+            minMax.maxY = bodyA.bottom;
+
+            var results = (group.physicsType === CONST.DYNAMIC_BODY) ? this.tree.search(minMax) : this.staticTree.search(minMax);
+
+            len = results.length;
+
+            for (i = 0; i < len; i++)
             {
-                if (group.children[i] && group.children[i].exists)
+                bodyB = results[i];
+
+                if (bodyA === bodyB || !bodyB.enable || bodyB.checkCollision.none || !group.contains(bodyB.gameObject))
                 {
-                    this.collideSpriteVsSprite(sprite, group.children[i], collideCallback, processCallback, callbackContext, overlapOnly);
+                    //  Skip if comparing against itself, or if bodyB isn't collidable, or if bodyB isn't actually part of the Group
+                    continue;
                 }
-            }
-        }
-        else
-        {
-            //  What is the sprite colliding with in the quadtree?
-            this.quadTree.clear();
 
-            this.quadTree.reset(this.game.world.bounds.x, this.game.world.bounds.y, this.game.world.bounds.width, this.game.world.bounds.height, this.maxObjects, this.maxLevels);
-
-            this.quadTree.populate(group);
-
-            this._potentials = this.quadTree.retrieve(sprite);
-
-            for (var i = 0, len = this._potentials.length; i < len; i++)
-            {
-                //  We have our potential suspects, are they in this group?
-                if (this.separate(sprite.body, this._potentials[i], processCallback, callbackContext, overlapOnly))
+                if (this.separate(bodyA, bodyB, processCallback, callbackContext, overlapOnly))
                 {
                     if (collideCallback)
                     {
-                        collideCallback.call(callbackContext, sprite, this._potentials[i].sprite);
+                        collideCallback.call(callbackContext, bodyA.gameObject, bodyB.gameObject);
                     }
 
                     this._total++;
                 }
             }
         }
-
-    },
-
-    /**
-    * An internal function. Use Phaser.Physics.Arcade.collide instead.
-    *
-    * @method Phaser.Physics.Arcade#collideGroupVsSelf
-    * @private
-    * @param {Phaser.Group} group - The Group to check.
-    * @param {function} collideCallback - An optional callback function that is called if the objects collide. The two objects will be passed to this function in the same order in which you specified them.
-    * @param {function} processCallback - A callback function that lets you perform additional checks against the two objects if they overlap. If this is set then collision will only happen if processCallback returns true. The two objects will be passed to this function in the same order in which you specified them.
-    * @param {object} callbackContext - The context in which to run the callbacks.
-    * @param {boolean} overlapOnly - Just run an overlap or a full collision.
-    * @return {boolean} True if there was a collision, otherwise false.
-    */
-    collideGroupVsSelf: function (group, collideCallback, processCallback, callbackContext, overlapOnly) {
-
-        if (group.length === 0)
+        else
         {
-            return;
-        }
+            var children = group.getChildren();
+            var skipIndex = children.indexOf(sprite);
 
-        var len = group.children.length;
+            len = children.length;
 
-        for (var i = 0; i < len - 1; i++)
-        {
-            for (var j = i + 1; j < len; j++)
+            for (i = 0; i < len; i++)
             {
-                if (group.children[i] && group.children[j] && group.children[i].exists && group.children[j].exists)
+                bodyB = children[i].body;
+
+                if (!bodyB || i === skipIndex || !bodyB.enable)
                 {
-                    this.collideSpriteVsSprite(group.children[i], group.children[j], collideCallback, processCallback, callbackContext, overlapOnly);
+                    continue;
                 }
-            }
-        }
 
-    },
-
-    /**
-    * An internal function. Use Phaser.Physics.Arcade.collide instead.
-    *
-    * @method Phaser.Physics.Arcade#collideGroupVsGroup
-    * @private
-    * @param {Phaser.Group} group1 - The first Group to check.
-    * @param {Phaser.Group} group2 - The second Group to check.
-    * @param {function} collideCallback - An optional callback function that is called if the objects collide. The two objects will be passed to this function in the same order in which you specified them.
-    * @param {function} processCallback - A callback function that lets you perform additional checks against the two objects if they overlap. If this is set then collision will only happen if processCallback returns true. The two objects will be passed to this function in the same order in which you specified them.
-    * @param {object} callbackContext - The context in which to run the callbacks.
-    * @param {boolean} overlapOnly - Just run an overlap or a full collision.
-    */
-    collideGroupVsGroup: function (group1, group2, collideCallback, processCallback, callbackContext, overlapOnly) {
-
-        if (group1.length === 0 || group2.length === 0)
-        {
-            return;
-        }
-
-        for (var i = 0, len = group1.children.length; i < len; i++)
-        {
-            if (group1.children[i].exists)
-            {
-                if (group1.children[i].type === Phaser.GROUP)
+                if (this.separate(bodyA, bodyB, processCallback, callbackContext, overlapOnly))
                 {
-                    this.collideGroupVsGroup(group1.children[i], group2, collideCallback, processCallback, callbackContext, overlapOnly);
-                }
-                else
-                {
-                    this.collideSpriteVsGroup(group1.children[i], group2, collideCallback, processCallback, callbackContext, overlapOnly);
-                }
-            }
-        }
-
-    },
-
-    /**
-    * An internal function. Use Phaser.Physics.Arcade.collide instead.
-    *
-    * @method Phaser.Physics.Arcade#collideSpriteVsTilemapLayer
-    * @private
-    * @param {Phaser.Sprite} sprite - The sprite to check.
-    * @param {Phaser.TilemapLayer} tilemapLayer - The layer to check.
-    * @param {function} collideCallback - An optional callback function that is called if the objects collide. The two objects will be passed to this function in the same order in which you specified them.
-    * @param {function} processCallback - A callback function that lets you perform additional checks against the two objects if they overlap. If this is set then collision will only happen if processCallback returns true. The two objects will be passed to this function in the same order in which you specified them.
-    * @param {object} callbackContext - The context in which to run the callbacks.
-    * @param {boolean} overlapOnly - Just run an overlap or a full collision.
-    */
-    collideSpriteVsTilemapLayer: function (sprite, tilemapLayer, collideCallback, processCallback, callbackContext) {
-
-        if (!sprite.body)
-        {
-            return;
-        }
-
-        this._mapData = tilemapLayer.getTiles(
-            sprite.body.position.x - sprite.body.tilePadding.x,
-            sprite.body.position.y - sprite.body.tilePadding.y,
-            sprite.body.width + sprite.body.tilePadding.x,
-            sprite.body.height + sprite.body.tilePadding.y,
-            false, false);
-
-        if (this._mapData.length === 0)
-        {
-            return;
-        }
-
-        for (var i = 0; i < this._mapData.length; i++)
-        {
-            if (processCallback)
-            {
-                if (processCallback.call(callbackContext, sprite, this._mapData[i]))
-                {
-                    if (this.separateTile(i, sprite.body, this._mapData[i]))
-                    {
-                        this._total++;
-
-                        if (collideCallback)
-                        {
-                            collideCallback.call(callbackContext, sprite, this._mapData[i]);
-                        }
-                    }
-                }
-            }
-            else
-            {
-                if (this.separateTile(i, sprite.body, this._mapData[i]))
-                {
-                    this._total++;
-
                     if (collideCallback)
                     {
-                        collideCallback.call(callbackContext, sprite, this._mapData[i]);
+                        collideCallback.call(callbackContext, bodyA.gameObject, bodyB.gameObject);
                     }
+
+                    this._total++;
+                }
+            }
+        }
+    },
+
+    /**
+     * Internal handler for Group vs. Tilemap collisions.
+     * Please use Phaser.Physics.Arcade.World#collide instead.
+     *
+     * @method Phaser.Physics.Arcade.World#collideGroupVsTilemapLayer
+     * @private
+     * @since 3.0.0
+     *
+     * @param {Phaser.GameObjects.Group} group - The first object to check for collision.
+     * @param {Phaser.Tilemaps.TilemapLayer} tilemapLayer - The second object to check for collision.
+     * @param {Phaser.Types.Physics.Arcade.ArcadePhysicsCallback} collideCallback - An optional callback function that is called if the objects collide.
+     * @param {Phaser.Types.Physics.Arcade.ArcadePhysicsCallback} processCallback - An optional callback function that lets you perform additional checks against the two objects if they collide. If this is set then `collideCallback` will only be called if this callback returns `true`.
+     * @param {any} callbackContext - The context in which to run the callbacks.
+     * @param {boolean} overlapOnly - Whether this is a collision or overlap check.
+     *
+     * @return {boolean} True if any objects overlap (with `overlapOnly`); or true if any overlapping objects were separated.
+     */
+    collideGroupVsTilemapLayer: function (group, tilemapLayer, collideCallback, processCallback, callbackContext, overlapOnly)
+    {
+        if (!this.canCollide(group, tilemapLayer))
+        {
+            return false;
+        }
+
+        var children = group.getChildren();
+
+        if (children.length === 0)
+        {
+            return false;
+        }
+
+        var didCollide = false;
+
+        for (var i = 0; i < children.length; i++)
+        {
+            if (children[i].body || children[i].isBody)
+            {
+                if (this.collideSpriteVsTilemapLayer(children[i], tilemapLayer, collideCallback, processCallback, callbackContext, overlapOnly))
+                {
+                    didCollide = true;
                 }
             }
         }
 
+        return didCollide;
     },
 
     /**
-    * An internal function. Use Phaser.Physics.Arcade.collide instead.
-    *
-    * @private
-    * @method Phaser.Physics.Arcade#collideGroupVsTilemapLayer
-    * @param {Phaser.Group} group - The Group to check.
-    * @param {Phaser.TilemapLayer} tilemapLayer - The layer to check.
-    * @param {function} collideCallback - An optional callback function that is called if the objects collide. The two objects will be passed to this function in the same order in which you specified them.
-    * @param {function} processCallback - A callback function that lets you perform additional checks against the two objects if they overlap. If this is set then collision will only happen if processCallback returns true. The two objects will be passed to this function in the same order in which you specified them.
-    * @param {object} callbackContext - The context in which to run the callbacks.
-    * @param {boolean} overlapOnly - Just run an overlap or a full collision.
-    */
-    collideGroupVsTilemapLayer: function (group, tilemapLayer, collideCallback, processCallback, callbackContext) {
+     * This advanced method is specifically for testing for collision between a single Sprite and an array of Tile objects.
+     *
+     * You should generally use the `collide` method instead, with a Sprite vs. a Tilemap Layer, as that will perform
+     * tile filtering and culling for you, as well as handle the interesting face collision automatically.
+     *
+     * This method is offered for those who would like to check for collision with specific Tiles in a layer, without
+     * having to set any collision attributes on the tiles in question. This allows you to perform quick dynamic collisions
+     * on small sets of Tiles. As such, no culling or checks are made to the array of Tiles given to this method,
+     * you should filter them before passing them to this method.
+     *
+     * Important: Use of this method skips the `interesting faces` system that Tilemap Layers use. This means if you have
+     * say a row or column of tiles, and you jump into, or walk over them, it's possible to get stuck on the edges of the
+     * tiles as the interesting face calculations are skipped. However, for quick-fire small collision set tests on
+     * dynamic maps, this method can prove very useful.
+     *
+     * This method does not factor in the Collision Mask or Category.
+     *
+     * @method Phaser.Physics.Arcade.World#collideTiles
+     * @fires Phaser.Physics.Arcade.Events#TILE_COLLIDE
+     * @since 3.17.0
+     *
+     * @param {Phaser.GameObjects.GameObject} sprite - The first object to check for collision.
+     * @param {Phaser.Tilemaps.Tile[]} tiles - An array of Tiles to check for collision against.
+     * @param {Phaser.Types.Physics.Arcade.ArcadePhysicsCallback} [collideCallback] - An optional callback function that is called if the objects collide.
+     * @param {Phaser.Types.Physics.Arcade.ArcadePhysicsCallback} [processCallback] - An optional callback function that lets you perform additional checks against the two objects if they collide. If this is set then `collideCallback` will only be called if this callback returns `true`.
+     * @param {any} [callbackContext] - The context in which to run the callbacks.
+     *
+     * @return {boolean} True if any overlapping objects were separated, otherwise false.
+     */
+    collideTiles: function (sprite, tiles, collideCallback, processCallback, callbackContext)
+    {
+        if (tiles.length === 0 || (sprite.body && !sprite.body.enable) || (sprite.isBody && !sprite.enable))
+        {
+            return false;
+        }
+        else
+        {
+            return this.collideSpriteVsTilesHandler(sprite, tiles, collideCallback, processCallback, callbackContext, false, false);
+        }
+    },
 
-        if (group.length === 0)
+    /**
+     * This advanced method is specifically for testing for overlaps between a single Sprite and an array of Tile objects.
+     *
+     * You should generally use the `overlap` method instead, with a Sprite vs. a Tilemap Layer, as that will perform
+     * tile filtering and culling for you, as well as handle the interesting face collision automatically.
+     *
+     * This method is offered for those who would like to check for overlaps with specific Tiles in a layer, without
+     * having to set any collision attributes on the tiles in question. This allows you to perform quick dynamic overlap
+     * tests on small sets of Tiles. As such, no culling or checks are made to the array of Tiles given to this method,
+     * you should filter them before passing them to this method.
+     *
+     * This method does not factor in the Collision Mask or Category.
+     *
+     * @method Phaser.Physics.Arcade.World#overlapTiles
+     * @fires Phaser.Physics.Arcade.Events#TILE_OVERLAP
+     * @since 3.17.0
+     *
+     * @param {Phaser.GameObjects.GameObject} sprite - The first object to check for collision.
+     * @param {Phaser.Tilemaps.Tile[]} tiles - An array of Tiles to check for collision against.
+     * @param {Phaser.Types.Physics.Arcade.ArcadePhysicsCallback} [overlapCallback] - An optional callback function that is called if the objects overlap.
+     * @param {Phaser.Types.Physics.Arcade.ArcadePhysicsCallback} [processCallback] - An optional callback function that lets you perform additional checks against the two objects if they collide. If this is set then `overlapCallback` will only be called if this callback returns `true`.
+     * @param {any} [callbackContext] - The context in which to run the callbacks.
+     *
+     * @return {boolean} True if any objects overlap, otherwise false.
+     */
+    overlapTiles: function (sprite, tiles, overlapCallback, processCallback, callbackContext)
+    {
+        if (tiles.length === 0 || (sprite.body && !sprite.body.enable) || (sprite.isBody && !sprite.enable))
+        {
+            return false;
+        }
+        else
+        {
+            return this.collideSpriteVsTilesHandler(sprite, tiles, overlapCallback, processCallback, callbackContext, true, false);
+        }
+    },
+
+    /**
+     * Internal handler for Sprite vs. Tilemap collisions.
+     * Please use Phaser.Physics.Arcade.World#collide instead.
+     *
+     * @method Phaser.Physics.Arcade.World#collideSpriteVsTilemapLayer
+     * @fires Phaser.Physics.Arcade.Events#TILE_COLLIDE
+     * @fires Phaser.Physics.Arcade.Events#TILE_OVERLAP
+     * @since 3.0.0
+     *
+     * @param {Phaser.GameObjects.GameObject} sprite - The first object to check for collision.
+     * @param {Phaser.Tilemaps.TilemapLayer} tilemapLayer - The second object to check for collision.
+     * @param {Phaser.Types.Physics.Arcade.ArcadePhysicsCallback} [collideCallback] - An optional callback function that is called if the objects collide.
+     * @param {Phaser.Types.Physics.Arcade.ArcadePhysicsCallback} [processCallback] - An optional callback function that lets you perform additional checks against the two objects if they collide. If this is set then `collideCallback` will only be called if this callback returns `true`.
+     * @param {any} [callbackContext] - The context in which to run the callbacks.
+     * @param {boolean} [overlapOnly] - Whether this is a collision or overlap check.
+     *
+     * @return {boolean} True if any objects overlap (with `overlapOnly`); or true if any overlapping objects were separated.
+     */
+    collideSpriteVsTilemapLayer: function (sprite, tilemapLayer, collideCallback, processCallback, callbackContext, overlapOnly)
+    {
+        var body = (sprite.isBody) ? sprite : sprite.body;
+
+        if (!body.enable || body.checkCollision.none || !this.canCollide(body, tilemapLayer))
+        {
+            return false;
+        }
+
+        var layerData = tilemapLayer.layer;
+
+        //  Increase the hit area of the body by the size of the tiles * the scale
+        //  This will allow GetTilesWithinWorldXY to include the tiles around the body
+
+        var x = body.x - (layerData.tileWidth * tilemapLayer.scaleX);
+        var y = body.y - (layerData.tileHeight * tilemapLayer.scaleY);
+        var w = body.width + (layerData.tileWidth * tilemapLayer.scaleX);
+        var h = body.height + layerData.tileHeight * tilemapLayer.scaleY;
+
+        var options = (overlapOnly) ? null : this.tileFilterOptions;
+
+        var mapData = GetTilesWithinWorldXY(x, y, w, h, options, tilemapLayer.scene.cameras.main, tilemapLayer.layer);
+
+        if (mapData.length === 0)
+        {
+            return false;
+        }
+        else
+        {
+            return this.collideSpriteVsTilesHandler(sprite, mapData, collideCallback, processCallback, callbackContext, overlapOnly, true);
+        }
+    },
+
+    /**
+     * Internal handler for Sprite vs. Tilemap collisions.
+     * Please use Phaser.Physics.Arcade.World#collide instead.
+     *
+     * @method Phaser.Physics.Arcade.World#collideSpriteVsTilesHandler
+     * @fires Phaser.Physics.Arcade.Events#TILE_COLLIDE
+     * @fires Phaser.Physics.Arcade.Events#TILE_OVERLAP
+     * @private
+     * @since 3.17.0
+     *
+     * @param {Phaser.GameObjects.GameObject} sprite - The first object to check for collision.
+     * @param {Phaser.Tilemaps.TilemapLayer} tilemapLayer - The second object to check for collision.
+     * @param {Phaser.Types.Physics.Arcade.ArcadePhysicsCallback} [collideCallback] - An optional callback function that is called if the objects collide.
+     * @param {Phaser.Types.Physics.Arcade.ArcadePhysicsCallback} [processCallback] - An optional callback function that lets you perform additional checks against the two objects if they collide. If this is set then `collideCallback` will only be called if this callback returns `true`.
+     * @param {any} [callbackContext] - The context in which to run the callbacks.
+     * @param {boolean} [overlapOnly] - Whether this is a collision or overlap check.
+     * @param {boolean} [isLayer] - Is this check coming from a TilemapLayer or an array of tiles?
+     *
+     * @return {boolean} True if any objects overlap (with `overlapOnly`); or true if any overlapping objects were separated.
+     */
+    collideSpriteVsTilesHandler: function (sprite, tiles, collideCallback, processCallback, callbackContext, overlapOnly, isLayer)
+    {
+        var body = (sprite.isBody) ? sprite : sprite.body;
+
+        var tile;
+        var tileWorldRect = { left: 0, right: 0, top: 0, bottom: 0 };
+        var tilemapLayer;
+        var collision = false;
+
+        for (var i = 0; i < tiles.length; i++)
+        {
+            tile = tiles[i];
+
+            tilemapLayer = tile.tilemapLayer;
+
+            var point = tilemapLayer.tileToWorldXY(tile.x, tile.y);
+
+            tileWorldRect.left = point.x;
+            tileWorldRect.top = point.y;
+
+            tileWorldRect.right = tileWorldRect.left + tile.width * tilemapLayer.scaleX;
+            tileWorldRect.bottom = tileWorldRect.top + tile.height * tilemapLayer.scaleY;
+
+            if (
+                TileIntersectsBody(tileWorldRect, body) &&
+                (!processCallback || processCallback.call(callbackContext, sprite, tile)) &&
+                ProcessTileCallbacks(tile, sprite) &&
+                (overlapOnly || SeparateTile(i, body, tile, tileWorldRect, tilemapLayer, this.TILE_BIAS, isLayer)))
+            {
+                this._total++;
+
+                collision = true;
+
+                if (collideCallback)
+                {
+                    collideCallback.call(callbackContext, sprite, tile);
+                }
+
+                if (overlapOnly && body.onOverlap)
+                {
+                    this.emit(Events.TILE_OVERLAP, sprite, tile, body);
+                }
+                else if (body.onCollide)
+                {
+                    this.emit(Events.TILE_COLLIDE, sprite, tile, body);
+                }
+            }
+        }
+
+        return collision;
+    },
+
+    /**
+     * Internal helper for Group vs. Group collisions.
+     * Please use Phaser.Physics.Arcade.World#collide instead.
+     *
+     * @method Phaser.Physics.Arcade.World#collideGroupVsGroup
+     * @private
+     * @since 3.0.0
+     *
+     * @param {Phaser.GameObjects.Group} group1 - The first object to check for collision.
+     * @param {Phaser.GameObjects.Group} group2 - The second object to check for collision.
+     * @param {Phaser.Types.Physics.Arcade.ArcadePhysicsCallback} [collideCallback] - An optional callback function that is called if the objects collide.
+     * @param {Phaser.Types.Physics.Arcade.ArcadePhysicsCallback} [processCallback] - An optional callback function that lets you perform additional checks against the two objects if they collide. If this is set then `collideCallback` will only be called if this callback returns `true`.
+     * @param {any} [callbackContext] - The context in which to run the callbacks.
+     * @param {boolean} overlapOnly - Whether this is a collision or overlap check.
+     *
+     * @return {boolean} True if any objects overlap (with `overlapOnly`); or true if any overlapping objects were separated.
+     */
+    collideGroupVsGroup: function (group1, group2, collideCallback, processCallback, callbackContext, overlapOnly)
+    {
+        if (group1.getLength() === 0 || group2.getLength() === 0 || !this.canCollide(group1, group2))
         {
             return;
         }
 
-        for (var i = 0, len = group.children.length; i < len; i++)
-        {
-            if (group.children[i].exists)
-            {
-                this.collideSpriteVsTilemapLayer(group.children[i], tilemapLayer, collideCallback, processCallback, callbackContext);
-            }
-        }
+        var children = group1.getChildren();
 
+        for (var i = 0; i < children.length; i++)
+        {
+            this.collideSpriteVsGroup(children[i], group2, collideCallback, processCallback, callbackContext, overlapOnly);
+        }
     },
 
     /**
-    * The core separation function to separate two physics bodies.
-    *
-    * @private
-    * @method Phaser.Physics.Arcade#separate
-    * @param {Phaser.Physics.Arcade.Body} body1 - The first Body object to separate.
-    * @param {Phaser.Physics.Arcade.Body} body2 - The second Body object to separate.
-    * @param {function} [processCallback=null] - A callback function that lets you perform additional checks against the two objects if they overlap. If this function is set then the sprites will only be collided if it returns true.
-    * @param {object} [callbackContext] - The context in which to run the process callback.
-    * @param {boolean} overlapOnly - Just run an overlap or a full collision.
-    * @return {boolean} Returns true if the bodies collided, otherwise false.
-    */
-    separate: function (body1, body2, processCallback, callbackContext, overlapOnly) {
-
-        if (!body1.enable || !body2.enable || !this.intersects(body1, body2))
+     * Wrap an object's coordinates (or several objects' coordinates) within {@link Phaser.Physics.Arcade.World#bounds}.
+     *
+     * If the object is outside any boundary edge (left, top, right, bottom), it will be moved to the same offset from the opposite edge (the interior).
+     *
+     * @method Phaser.Physics.Arcade.World#wrap
+     * @since 3.3.0
+     *
+     * @param {any} object - A Game Object, a Group, an object with `x` and `y` coordinates, or an array of such objects.
+     * @param {number} [padding=0] - An amount added to each boundary edge during the operation.
+     */
+    wrap: function (object, padding)
+    {
+        if (object.body)
         {
-            return false;
+            this.wrapObject(object, padding);
         }
-
-        //  They overlap. Is there a custom process callback? If it returns true then we can carry on, otherwise we should abort.
-        if (processCallback && processCallback.call(callbackContext, body1.sprite, body2.sprite) === false)
+        else if (object.getChildren)
         {
-            return false;
+            this.wrapArray(object.getChildren(), padding);
         }
-
-        //  Do we separate on x or y first?
-
-        //  If we weren't having to carry around so much legacy baggage with us, we could do this properly. But alas ...
-        if (this.forceX || Math.abs(this.gravity.y + body1.gravity.y) < Math.abs(this.gravity.x + body1.gravity.x))
+        else if (Array.isArray(object))
         {
-            this._result = (this.separateX(body1, body2, overlapOnly) || this.separateY(body1, body2, overlapOnly));
+            this.wrapArray(object, padding);
         }
         else
         {
-            this._result = (this.separateY(body1, body2, overlapOnly) || this.separateX(body1, body2, overlapOnly));
+            this.wrapObject(object, padding);
         }
-
-        if (overlapOnly)
-        {
-            //  We already know they intersect from the check above, but by this point we know they've now had their overlapX/Y values populated
-            return true;
-        }
-        else
-        {
-            return this._result;
-        }
-
     },
 
     /**
-    * Check for intersection against two bodies.
-    *
-    * @method Phaser.Physics.Arcade#intersects
-    * @param {Phaser.Physics.Arcade.Body} body1 - The Body object to check.
-    * @param {Phaser.Physics.Arcade.Body} body2 - The Body object to check.
-    * @return {boolean} True if they intersect, otherwise false.
-    */
-    intersects: function (body1, body2) {
-
-        if (body1.right <= body2.position.x)
+     * Wrap each object's coordinates within {@link Phaser.Physics.Arcade.World#bounds}.
+     *
+     * @method Phaser.Physics.Arcade.World#wrapArray
+     * @since 3.3.0
+     *
+     * @param {Array.<*>} objects - An array of objects to be wrapped.
+     * @param {number} [padding=0] - An amount added to the boundary.
+     */
+    wrapArray: function (objects, padding)
+    {
+        for (var i = 0; i < objects.length; i++)
         {
-            return false;
+            this.wrapObject(objects[i], padding);
         }
-
-        if (body1.bottom <= body2.position.y)
-        {
-            return false;
-        }
-
-        if (body1.position.x >= body2.right)
-        {
-            return false;
-        }
-
-        if (body1.position.y >= body2.bottom)
-        {
-            return false;
-        }
-
-        return true;
-
     },
 
     /**
-    * The core separation function to separate two physics bodies on the x axis.
-    *
-    * @private
-    * @method Phaser.Physics.Arcade#separateX
-    * @param {Phaser.Physics.Arcade.Body} body1 - The Body object to separate.
-    * @param {Phaser.Physics.Arcade.Body} body2 - The Body object to separate.
-    * @param {boolean} overlapOnly - If true the bodies will only have their overlap data set, no separation or exchange of velocity will take place.
-    * @return {boolean} Returns true if the bodies were separated, otherwise false.
-    */
-    separateX: function (body1, body2, overlapOnly) {
+     * Wrap an object's coordinates within {@link Phaser.Physics.Arcade.World#bounds}.
+     *
+     * @method Phaser.Physics.Arcade.World#wrapObject
+     * @since 3.3.0
+     *
+     * @param {*} object - A Game Object, a Physics Body, or any object with `x` and `y` coordinates
+     * @param {number} [padding=0] - An amount added to the boundary.
+     */
+    wrapObject: function (object, padding)
+    {
+        if (padding === undefined) { padding = 0; }
 
-        //  Can't separate two immovable bodies
-        if (body1.immovable && body2.immovable)
-        {
-            return false;
-        }
-
-        this._overlap = 0;
-
-        //  Check if the hulls actually overlap
-        if (this.intersects(body1, body2))
-        {
-            this._maxOverlap = body1.deltaAbsX() + body2.deltaAbsX() + this.OVERLAP_BIAS;
-
-            if (body1.deltaX() === 0 && body2.deltaX() === 0)
-            {
-                //  They overlap but neither of them are moving
-                body1.embedded = true;
-                body2.embedded = true;
-            }
-            else if (body1.deltaX() > body2.deltaX())
-            {
-                //  Body1 is moving right and/or Body2 is moving left
-                this._overlap = body1.right - body2.x;
-
-                if ((this._overlap > this._maxOverlap) || body1.checkCollision.right === false || body2.checkCollision.left === false)
-                {
-                    this._overlap = 0;
-                }
-                else
-                {
-                    body1.touching.none = false;
-                    body1.touching.right = true;
-                    body2.touching.none = false;
-                    body2.touching.left = true;
-                }
-            }
-            else if (body1.deltaX() < body2.deltaX())
-            {
-                //  Body1 is moving left and/or Body2 is moving right
-                this._overlap = body1.x - body2.width - body2.x;
-
-                if ((-this._overlap > this._maxOverlap) || body1.checkCollision.left === false || body2.checkCollision.right === false)
-                {
-                    this._overlap = 0;
-                }
-                else
-                {
-                    body1.touching.none = false;
-                    body1.touching.left = true;
-                    body2.touching.none = false;
-                    body2.touching.right = true;
-                }
-            }
-
-            //  Resets the overlapX to zero if there is no overlap, or to the actual pixel value if there is
-            body1.overlapX = this._overlap;
-            body2.overlapX = this._overlap;
-
-            //  Then adjust their positions and velocities accordingly (if there was any overlap)
-            if (this._overlap !== 0)
-            {
-                if (overlapOnly || body1.customSeparateX || body2.customSeparateX)
-                {
-                    return true;
-                }
-
-                this._velocity1 = body1.velocity.x;
-                this._velocity2 = body2.velocity.x;
-
-                if (!body1.immovable && !body2.immovable)
-                {
-                    this._overlap *= 0.5;
-
-                    body1.x = body1.x - this._overlap;
-                    body2.x += this._overlap;
-
-                    this._newVelocity1 = Math.sqrt((this._velocity2 * this._velocity2 * body2.mass) / body1.mass) * ((this._velocity2 > 0) ? 1 : -1);
-                    this._newVelocity2 = Math.sqrt((this._velocity1 * this._velocity1 * body1.mass) / body2.mass) * ((this._velocity1 > 0) ? 1 : -1);
-                    this._average = (this._newVelocity1 + this._newVelocity2) * 0.5;
-                    this._newVelocity1 -= this._average;
-                    this._newVelocity2 -= this._average;
-
-                    body1.velocity.x = this._average + this._newVelocity1 * body1.bounce.x;
-                    body2.velocity.x = this._average + this._newVelocity2 * body2.bounce.x;
-                }
-                else if (!body1.immovable)
-                {
-                    body1.x = body1.x - this._overlap;
-                    body1.velocity.x = this._velocity2 - this._velocity1 * body1.bounce.x;
-                }
-                else if (!body2.immovable)
-                {
-                    body2.x += this._overlap;
-                    body2.velocity.x = this._velocity1 - this._velocity2 * body2.bounce.x;
-                }
-
-                return true;
-            }
-        }
-
-        return false;
-
+        object.x = Wrap(object.x, this.bounds.left - padding, this.bounds.right + padding);
+        object.y = Wrap(object.y, this.bounds.top - padding, this.bounds.bottom + padding);
     },
 
     /**
-    * The core separation function to separate two physics bodies on the y axis.
-    *
-    * @private
-    * @method Phaser.Physics.Arcade#separateY
-    * @param {Phaser.Physics.Arcade.Body} body1 - The Body object to separate.
-    * @param {Phaser.Physics.Arcade.Body} body2 - The Body object to separate.
-    * @param {boolean} overlapOnly - If true the bodies will only have their overlap data set, no separation or exchange of velocity will take place.
-    * @return {boolean} Returns true if the bodies were separated, otherwise false.
-    */
-    separateY: function (body1, body2, overlapOnly) {
+     * Shuts down the simulation, clearing physics data and removing listeners.
+     *
+     * @method Phaser.Physics.Arcade.World#shutdown
+     * @since 3.0.0
+     */
+    shutdown: function ()
+    {
+        this.tree.clear();
+        this.staticTree.clear();
+        this.bodies.clear();
+        this.staticBodies.clear();
+        this.colliders.destroy();
 
-        //  Can't separate two immovable or non-existing bodies
-        if (body1.immovable && body2.immovable)
-        {
-            return false;
-        }
-
-        this._overlap = 0;
-
-        //  Check if the hulls actually overlap
-        if (this.intersects(body1, body2))
-        {
-            this._maxOverlap = body1.deltaAbsY() + body2.deltaAbsY() + this.OVERLAP_BIAS;
-
-            if (body1.deltaY() === 0 && body2.deltaY() === 0)
-            {
-                //  They overlap but neither of them are moving
-                body1.embedded = true;
-                body2.embedded = true;
-            }
-            else if (body1.deltaY() > body2.deltaY())
-            {
-                //  Body1 is moving down and/or Body2 is moving up
-                this._overlap = body1.bottom - body2.y;
-
-                if ((this._overlap > this._maxOverlap) || body1.checkCollision.down === false || body2.checkCollision.up === false)
-                {
-                    this._overlap = 0;
-                }
-                else
-                {
-                    body1.touching.none = false;
-                    body1.touching.down = true;
-                    body2.touching.none = false;
-                    body2.touching.up = true;
-                }
-            }
-            else if (body1.deltaY() < body2.deltaY())
-            {
-                //  Body1 is moving up and/or Body2 is moving down
-                this._overlap = body1.y - body2.bottom;
-
-                if ((-this._overlap > this._maxOverlap) || body1.checkCollision.up === false || body2.checkCollision.down === false)
-                {
-                    this._overlap = 0;
-                }
-                else
-                {
-                    body1.touching.none = false;
-                    body1.touching.up = true;
-                    body2.touching.none = false;
-                    body2.touching.down = true;
-                }
-            }
-
-            //  Resets the overlapY to zero if there is no overlap, or to the actual pixel value if there is
-            body1.overlapY = this._overlap;
-            body2.overlapY = this._overlap;
-
-            //  Then adjust their positions and velocities accordingly (if there was any overlap)
-            if (this._overlap !== 0)
-            {
-                if (overlapOnly || body1.customSeparateY || body2.customSeparateY)
-                {
-                    return true;
-                }
-
-                this._velocity1 = body1.velocity.y;
-                this._velocity2 = body2.velocity.y;
-
-                if (!body1.immovable && !body2.immovable)
-                {
-                    this._overlap *= 0.5;
-
-                    body1.y = body1.y - this._overlap;
-                    body2.y += this._overlap;
-
-                    this._newVelocity1 = Math.sqrt((this._velocity2 * this._velocity2 * body2.mass) / body1.mass) * ((this._velocity2 > 0) ? 1 : -1);
-                    this._newVelocity2 = Math.sqrt((this._velocity1 * this._velocity1 * body1.mass) / body2.mass) * ((this._velocity1 > 0) ? 1 : -1);
-                    this._average = (this._newVelocity1 + this._newVelocity2) * 0.5;
-                    this._newVelocity1 -= this._average;
-                    this._newVelocity2 -= this._average;
-
-                    body1.velocity.y = this._average + this._newVelocity1 * body1.bounce.y;
-                    body2.velocity.y = this._average + this._newVelocity2 * body2.bounce.y;
-                }
-                else if (!body1.immovable)
-                {
-                    body1.y = body1.y - this._overlap;
-                    body1.velocity.y = this._velocity2 - this._velocity1 * body1.bounce.y;
-
-                    //  This is special case code that handles things like horizontal moving platforms you can ride
-                    if (body2.moves)
-                    {
-                        body1.x += body2.x - body2.prev.x;
-                    }
-                }
-                else if (!body2.immovable)
-                {
-                    body2.y += this._overlap;
-                    body2.velocity.y = this._velocity1 - this._velocity2 * body2.bounce.y;
-
-                    //  This is special case code that handles things like horizontal moving platforms you can ride
-                    if (body1.moves)
-                    {
-                        body2.x += body1.x - body1.prev.x;
-                    }
-                }
-
-                return true;
-            }
-
-        }
-
-        return false;
-
+        this.removeAllListeners();
     },
 
     /**
-    * The core separation function to separate a physics body and a tile.
-    *
-    * @private
-    * @method Phaser.Physics.Arcade#separateTile
-    * @param {Phaser.Physics.Arcade.Body} body - The Body object to separate.
-    * @param {Phaser.Tile} tile - The tile to collide against.
-    * @return {boolean} Returns true if the body was separated, otherwise false.
-    */
-    separateTile: function (i, body, tile) {
+     * Shuts down the simulation and disconnects it from the current scene.
+     *
+     * @method Phaser.Physics.Arcade.World#destroy
+     * @since 3.0.0
+     */
+    destroy: function ()
+    {
+        this.shutdown();
 
-        //  We re-check for collision in case body was separated in a previous step
-        if (!body.enable || !tile.intersects(body.position.x, body.position.y, body.right, body.bottom))
+        this.scene = null;
+
+        if (this.debugGraphic)
         {
-            //  no collision so bail out (separated in a previous step)
-            return false;
+            this.debugGraphic.destroy();
+            this.debugGraphic = null;
         }
-
-        //  They overlap. Any custom callbacks?
-
-        //  A local callback always takes priority over a layer level callback
-        if (tile.collisionCallback && !tile.collisionCallback.call(tile.collisionCallbackContext, body.sprite, tile))
-        {
-            //  If it returns true then we can carry on, otherwise we should abort.
-            return false;
-        }
-        else if (tile.layer.callbacks[tile.index] && !tile.layer.callbacks[tile.index].callback.call(tile.layer.callbacks[tile.index].callbackContext, body.sprite, tile))
-        {
-            //  If it returns true then we can carry on, otherwise we should abort.
-            return false;
-        }
-
-        //  We don't need to go any further if this tile doesn't actually separate
-        if (!tile.faceLeft && !tile.faceRight && !tile.faceTop && !tile.faceBottom)
-        {
-            //   This could happen if the tile was meant to be collided with re: a callback, but otherwise isn't needed for separation
-            return false;
-        }
-
-        var ox = 0;
-        var oy = 0;
-        var minX = 0;
-        var minY = 1;
-
-        if (body.deltaAbsX() > body.deltaAbsY())
-        {
-            //  Moving faster horizontally, check X axis first
-            minX = -1;
-        }
-        else if (body.deltaAbsX() < body.deltaAbsY())
-        {
-            //  Moving faster vertically, check Y axis first
-            minY = -1;
-        }
-
-        if (body.deltaX() !== 0 && body.deltaY() !== 0 && (tile.faceLeft || tile.faceRight) && (tile.faceTop || tile.faceBottom))
-        {
-            //  We only need do this if both axis have checking faces AND we're moving in both directions
-            minX = Math.min(Math.abs(body.position.x - tile.right), Math.abs(body.right - tile.left));
-            minY = Math.min(Math.abs(body.position.y - tile.bottom), Math.abs(body.bottom - tile.top));
-        }
-
-        if (minX < minY)
-        {
-            if (tile.faceLeft || tile.faceRight)
-            {
-                ox = this.tileCheckX(body, tile);
-
-                //  That's horizontal done, check if we still intersects? If not then we can return now
-                if (ox !== 0 && !tile.intersects(body.position.x, body.position.y, body.right, body.bottom))
-                {
-                    return true;
-                }
-            }
-
-            if (tile.faceTop || tile.faceBottom)
-            {
-                oy = this.tileCheckY(body, tile);
-            }
-        }
-        else
-        {
-            if (tile.faceTop || tile.faceBottom)
-            {
-                oy = this.tileCheckY(body, tile);
-
-                //  That's vertical done, check if we still intersects? If not then we can return now
-                if (oy !== 0 && !tile.intersects(body.position.x, body.position.y, body.right, body.bottom))
-                {
-                    return true;
-                }
-            }
-
-            if (tile.faceLeft || tile.faceRight)
-            {
-                ox = this.tileCheckX(body, tile);
-            }
-        }
-
-        return (ox !== 0 || oy !== 0);
-
-    },
-
-    /**
-    * Check the body against the given tile on the X axis.
-    *
-    * @private
-    * @method Phaser.Physics.Arcade#tileCheckX
-    * @param {Phaser.Physics.Arcade.Body} body - The Body object to separate.
-    * @param {Phaser.Tile} tile - The tile to check.
-    * @return {number} The amount of separation that occurred.
-    */
-    tileCheckX: function (body, tile) {
-
-        var ox = 0;
-
-        if (body.deltaX() < 0 && !body.blocked.left && tile.collideRight && body.checkCollision.left)
-        {
-            //  Body is moving LEFT
-            if (tile.faceRight && body.x < tile.right)
-            {
-                ox = body.x - tile.right;
-
-                if (ox < -this.TILE_BIAS)
-                {
-                    ox = 0;
-                }
-            }
-        }
-        else if (body.deltaX() > 0 && !body.blocked.right && tile.collideLeft && body.checkCollision.right)
-        {
-            //  Body is moving RIGHT
-            if (tile.faceLeft && body.right > tile.left)
-            {
-                ox = body.right - tile.left;
-
-                if (ox > this.TILE_BIAS)
-                {
-                    ox = 0;
-                }
-            }
-        }
-
-        if (ox !== 0)
-        {
-            this.processTileSeparationX(body, ox);
-        }
-
-        return ox;
-
-    },
-
-    /**
-    * Check the body against the given tile on the Y axis.
-    *
-    * @private
-    * @method Phaser.Physics.Arcade#tileCheckY
-    * @param {Phaser.Physics.Arcade.Body} body - The Body object to separate.
-    * @param {Phaser.Tile} tile - The tile to check.
-    * @return {number} The amount of separation that occurred.
-    */
-    tileCheckY: function (body, tile) {
-
-        var oy = 0;
-
-        if (body.deltaY() < 0 && !body.blocked.up && tile.collideDown && body.checkCollision.up)
-        {
-            //  Body is moving UP
-            if (tile.faceBottom && body.y < tile.bottom)
-            {
-                oy = body.y - tile.bottom;
-
-                if (oy < -this.TILE_BIAS)
-                {
-                    oy = 0;
-                }
-            }
-        }
-        else if (body.deltaY() > 0 && !body.blocked.down && tile.collideUp && body.checkCollision.down)
-        {
-            //  Body is moving DOWN
-            if (tile.faceTop && body.bottom > tile.top)
-            {
-                oy = body.bottom - tile.top;
-
-                if (oy > this.TILE_BIAS)
-                {
-                    oy = 0;
-                }
-            }
-        }
-
-        if (oy !== 0)
-        {
-            this.processTileSeparationY(body, oy);
-        }
-
-        return oy;
-
-    },
-
-    /**
-    * Internal function to process the separation of a physics body from a tile.
-    *
-    * @private
-    * @method Phaser.Physics.Arcade#processTileSeparationX
-    * @param {Phaser.Physics.Arcade.Body} body - The Body object to separate.
-    * @param {number} x - The x separation amount.
-    * @return {boolean} Returns true as a pass-thru to the separateTile method.
-    */
-    processTileSeparationX: function (body, x) {
-
-        if (x < 0)
-        {
-            body.blocked.left = true;
-        }
-        else if (x > 0)
-        {
-            body.blocked.right = true;
-        }
-
-        body.position.x -= x;
-
-        if (body.bounce.x === 0)
-        {
-            body.velocity.x = 0;
-        }
-        else
-        {
-            body.velocity.x = -body.velocity.x * body.bounce.x;
-        }
-
-    },
-
-    /**
-    * Internal function to process the separation of a physics body from a tile.
-    *
-    * @private
-    * @method Phaser.Physics.Arcade#processTileSeparationY
-    * @param {Phaser.Physics.Arcade.Body} body - The Body object to separate.
-    * @param {number} y - The y separation amount.
-    */
-    processTileSeparationY: function (body, y) {
-
-        if (y < 0)
-        {
-            body.blocked.up = true;
-        }
-        else if (y > 0)
-        {
-            body.blocked.down = true;
-        }
-
-        body.position.y -= y;
-
-        if (body.bounce.y === 0)
-        {
-            body.velocity.y = 0;
-        }
-        else
-        {
-            body.velocity.y = -body.velocity.y * body.bounce.y;
-        }
-
-    },
-
-    /**
-    * Given a Group and a Pointer this will check to see which Group children overlap with the Pointer coordinates.
-    * Each child will be sent to the given callback for further processing.
-    * Note that the children are not checked for depth order, but simply if they overlap the Pointer or not.
-    *
-    * @method Phaser.Physics.Arcade#getObjectsUnderPointer
-    * @param {Phaser.Pointer} pointer - The Pointer to check.
-    * @param {Phaser.Group} group - The Group to check.
-    * @param {function} [callback] - A callback function that is called if the object overlaps with the Pointer. The callback will be sent two parameters: the Pointer and the Object that overlapped with it.
-    * @param {object} [callbackContext] - The context in which to run the callback.
-    * @return {PIXI.DisplayObject[]} An array of the Sprites from the Group that overlapped the Pointer coordinates.
-    */
-    getObjectsUnderPointer: function (pointer, group, callback, callbackContext) {
-
-        if (group.length === 0 || !pointer.exists)
-        {
-            return;
-        }
-
-        return this.getObjectsAtLocation(pointer.x, pointer.y, group, callback, callbackContext, pointer);
-
-    },
-
-    /**
-    * Given a Group and a location this will check to see which Group children overlap with the coordinates.
-    * Each child will be sent to the given callback for further processing.
-    * Note that the children are not checked for depth order, but simply if they overlap the coordinate or not.
-    *
-    * @method Phaser.Physics.Arcade#getObjectsAtLocation
-    * @param {Phaser.Pointer} pointer - The Pointer to check.
-    * @param {Phaser.Group} group - The Group to check.
-    * @param {function} [callback] - A callback function that is called if the object overlaps the coordinates. The callback will be sent two parameters: the callbackArg and the Object that overlapped the location.
-    * @param {object} [callbackContext] - The context in which to run the callback.
-    * @param {object} [callbackArg] - An argument to pass to the callback.
-    * @return {PIXI.DisplayObject[]} An array of the Sprites from the Group that overlapped the coordinates.
-    */
-    getObjectsAtLocation: function (x, y, group, callback, callbackContext, callbackArg) {
-
-        this.quadTree.clear();
-
-        this.quadTree.reset(this.game.world.bounds.x, this.game.world.bounds.y, this.game.world.bounds.width, this.game.world.bounds.height, this.maxObjects, this.maxLevels);
-
-        this.quadTree.populate(group);
-
-        var rect = new Phaser.Rectangle(x, y, 1, 1);
-        var output = [];
-
-        this._potentials = this.quadTree.retrieve(rect);
-
-        for (var i = 0, len = this._potentials.length; i < len; i++)
-        {
-            if (this._potentials[i].hitTest(x, y))
-            {
-                if (callback)
-                {
-                    callback.call(callbackContext, callbackArg, this._potentials[i].sprite);
-                }
-
-                output.push(this._potentials[i].sprite);
-            }
-        }
-
-        return output;
-        
-    },
-
-    /**
-    * Move the given display object towards the destination object at a steady velocity.
-    * If you specify a maxTime then it will adjust the speed (overwriting what you set) so it arrives at the destination in that number of seconds.
-    * Timings are approximate due to the way browser timers work. Allow for a variance of +- 50ms.
-    * Note: The display object does not continuously track the target. If the target changes location during transit the display object will not modify its course.
-    * Note: The display object doesn't stop moving once it reaches the destination coordinates.
-    * Note: Doesn't take into account acceleration, maxVelocity or drag (if you've set drag or acceleration too high this object may not move at all)
-    *
-    * @method Phaser.Physics.Arcade#moveToObject
-    * @param {any} displayObject - The display object to move.
-    * @param {any} destination - The display object to move towards. Can be any object but must have visible x/y properties.
-    * @param {number} [speed=60] - The speed it will move, in pixels per second (default is 60 pixels/sec)
-    * @param {number} [maxTime=0] - Time given in milliseconds (1000 = 1 sec). If set the speed is adjusted so the object will arrive at destination in the given number of ms.
-    * @return {number} The angle (in radians) that the object should be visually set to in order to match its new velocity.
-    */
-    moveToObject: function (displayObject, destination, speed, maxTime) {
-
-        if (typeof speed === 'undefined') { speed = 60; }
-        if (typeof maxTime === 'undefined') { maxTime = 0; }
-
-        this._angle = Math.atan2(destination.y - displayObject.y, destination.x - displayObject.x);
-
-        if (maxTime > 0)
-        {
-            //  We know how many pixels we need to move, but how fast?
-            speed = this.distanceBetween(displayObject, destination) / (maxTime / 1000);
-        }
-
-        displayObject.body.velocity.x = Math.cos(this._angle) * speed;
-        displayObject.body.velocity.y = Math.sin(this._angle) * speed;
-
-        return this._angle;
-
-    },
-
-    /**
-    * Move the given display object towards the pointer at a steady velocity. If no pointer is given it will use Phaser.Input.activePointer.
-    * If you specify a maxTime then it will adjust the speed (over-writing what you set) so it arrives at the destination in that number of seconds.
-    * Timings are approximate due to the way browser timers work. Allow for a variance of +- 50ms.
-    * Note: The display object does not continuously track the target. If the target changes location during transit the display object will not modify its course.
-    * Note: The display object doesn't stop moving once it reaches the destination coordinates.
-    *
-    * @method Phaser.Physics.Arcade#moveToPointer
-    * @param {any} displayObject - The display object to move.
-    * @param {number} [speed=60] - The speed it will move, in pixels per second (default is 60 pixels/sec)
-    * @param {Phaser.Pointer} [pointer] - The pointer to move towards. Defaults to Phaser.Input.activePointer.
-    * @param {number} [maxTime=0] - Time given in milliseconds (1000 = 1 sec). If set the speed is adjusted so the object will arrive at destination in the given number of ms.
-    * @return {number} The angle (in radians) that the object should be visually set to in order to match its new velocity.
-    */
-    moveToPointer: function (displayObject, speed, pointer, maxTime) {
-
-        if (typeof speed === 'undefined') { speed = 60; }
-        pointer = pointer || this.game.input.activePointer;
-        if (typeof maxTime === 'undefined') { maxTime = 0; }
-
-        this._angle = this.angleToPointer(displayObject, pointer);
-
-        if (maxTime > 0)
-        {
-            //  We know how many pixels we need to move, but how fast?
-            speed = this.distanceToPointer(displayObject, pointer) / (maxTime / 1000);
-        }
-
-        displayObject.body.velocity.x = Math.cos(this._angle) * speed;
-        displayObject.body.velocity.y = Math.sin(this._angle) * speed;
-
-        return this._angle;
-
-    },
-
-    /**
-    * Move the given display object towards the x/y coordinates at a steady velocity.
-    * If you specify a maxTime then it will adjust the speed (over-writing what you set) so it arrives at the destination in that number of seconds.
-    * Timings are approximate due to the way browser timers work. Allow for a variance of +- 50ms.
-    * Note: The display object does not continuously track the target. If the target changes location during transit the display object will not modify its course.
-    * Note: The display object doesn't stop moving once it reaches the destination coordinates.
-    * Note: Doesn't take into account acceleration, maxVelocity or drag (if you've set drag or acceleration too high this object may not move at all)
-    *
-    * @method Phaser.Physics.Arcade#moveToXY
-    * @param {any} displayObject - The display object to move.
-    * @param {number} x - The x coordinate to move towards.
-    * @param {number} y - The y coordinate to move towards.
-    * @param {number} [speed=60] - The speed it will move, in pixels per second (default is 60 pixels/sec)
-    * @param {number} [maxTime=0] - Time given in milliseconds (1000 = 1 sec). If set the speed is adjusted so the object will arrive at destination in the given number of ms.
-    * @return {number} The angle (in radians) that the object should be visually set to in order to match its new velocity.
-    */
-    moveToXY: function (displayObject, x, y, speed, maxTime) {
-
-        if (typeof speed === 'undefined') { speed = 60; }
-        if (typeof maxTime === 'undefined') { maxTime = 0; }
-
-        this._angle = Math.atan2(y - displayObject.y, x - displayObject.x);
-
-        if (maxTime > 0)
-        {
-            //  We know how many pixels we need to move, but how fast?
-            speed = this.distanceToXY(displayObject, x, y) / (maxTime / 1000);
-        }
-
-        displayObject.body.velocity.x = Math.cos(this._angle) * speed;
-        displayObject.body.velocity.y = Math.sin(this._angle) * speed;
-
-        return this._angle;
-
-    },
-
-    /**
-    * Given the angle (in degrees) and speed calculate the velocity and return it as a Point object, or set it to the given point object.
-    * One way to use this is: velocityFromAngle(angle, 200, sprite.velocity) which will set the values directly to the sprites velocity and not create a new Point object.
-    *
-    * @method Phaser.Physics.Arcade#velocityFromAngle
-    * @param {number} angle - The angle in degrees calculated in clockwise positive direction (down = 90 degrees positive, right = 0 degrees positive, up = 90 degrees negative)
-    * @param {number} [speed=60] - The speed it will move, in pixels per second sq.
-    * @param {Phaser.Point|object} [point] - The Point object in which the x and y properties will be set to the calculated velocity.
-    * @return {Phaser.Point} - A Point where point.x contains the velocity x value and point.y contains the velocity y value.
-    */
-    velocityFromAngle: function (angle, speed, point) {
-
-        if (typeof speed === 'undefined') { speed = 60; }
-        point = point || new Phaser.Point();
-
-        return point.setTo((Math.cos(this.game.math.degToRad(angle)) * speed), (Math.sin(this.game.math.degToRad(angle)) * speed));
-
-    },
-
-    /**
-    * Given the rotation (in radians) and speed calculate the velocity and return it as a Point object, or set it to the given point object.
-    * One way to use this is: velocityFromRotation(rotation, 200, sprite.velocity) which will set the values directly to the sprites velocity and not create a new Point object.
-    *
-    * @method Phaser.Physics.Arcade#velocityFromRotation
-    * @param {number} rotation - The angle in radians.
-    * @param {number} [speed=60] - The speed it will move, in pixels per second sq.
-    * @param {Phaser.Point|object} [point] - The Point object in which the x and y properties will be set to the calculated velocity.
-    * @return {Phaser.Point} - A Point where point.x contains the velocity x value and point.y contains the velocity y value.
-    */
-    velocityFromRotation: function (rotation, speed, point) {
-
-        if (typeof speed === 'undefined') { speed = 60; }
-        point = point || new Phaser.Point();
-
-        return point.setTo((Math.cos(rotation) * speed), (Math.sin(rotation) * speed));
-
-    },
-
-    /**
-    * Given the rotation (in radians) and speed calculate the acceleration and return it as a Point object, or set it to the given point object.
-    * One way to use this is: accelerationFromRotation(rotation, 200, sprite.acceleration) which will set the values directly to the sprites acceleration and not create a new Point object.
-    *
-    * @method Phaser.Physics.Arcade#accelerationFromRotation
-    * @param {number} rotation - The angle in radians.
-    * @param {number} [speed=60] - The speed it will move, in pixels per second sq.
-    * @param {Phaser.Point|object} [point] - The Point object in which the x and y properties will be set to the calculated acceleration.
-    * @return {Phaser.Point} - A Point where point.x contains the acceleration x value and point.y contains the acceleration y value.
-    */
-    accelerationFromRotation: function (rotation, speed, point) {
-
-        if (typeof speed === 'undefined') { speed = 60; }
-        point = point || new Phaser.Point();
-
-        return point.setTo((Math.cos(rotation) * speed), (Math.sin(rotation) * speed));
-
-    },
-
-    /**
-    * Sets the acceleration.x/y property on the display object so it will move towards the target at the given speed (in pixels per second sq.)
-    * You must give a maximum speed value, beyond which the display object won't go any faster.
-    * Note: The display object does not continuously track the target. If the target changes location during transit the display object will not modify its course.
-    * Note: The display object doesn't stop moving once it reaches the destination coordinates.
-    *
-    * @method Phaser.Physics.Arcade#accelerateToObject
-    * @param {any} displayObject - The display object to move.
-    * @param {any} destination - The display object to move towards. Can be any object but must have visible x/y properties.
-    * @param {number} [speed=60] - The speed it will accelerate in pixels per second.
-    * @param {number} [xSpeedMax=500] - The maximum x velocity the display object can reach.
-    * @param {number} [ySpeedMax=500] - The maximum y velocity the display object can reach.
-    * @return {number} The angle (in radians) that the object should be visually set to in order to match its new trajectory.
-    */
-    accelerateToObject: function (displayObject, destination, speed, xSpeedMax, ySpeedMax) {
-
-        if (typeof speed === 'undefined') { speed = 60; }
-        if (typeof xSpeedMax === 'undefined') { xSpeedMax = 1000; }
-        if (typeof ySpeedMax === 'undefined') { ySpeedMax = 1000; }
-
-        this._angle = this.angleBetween(displayObject, destination);
-
-        displayObject.body.acceleration.setTo(Math.cos(this._angle) * speed, Math.sin(this._angle) * speed);
-        displayObject.body.maxVelocity.setTo(xSpeedMax, ySpeedMax);
-
-        return this._angle;
-
-    },
-
-    /**
-    * Sets the acceleration.x/y property on the display object so it will move towards the target at the given speed (in pixels per second sq.)
-    * You must give a maximum speed value, beyond which the display object won't go any faster.
-    * Note: The display object does not continuously track the target. If the target changes location during transit the display object will not modify its course.
-    * Note: The display object doesn't stop moving once it reaches the destination coordinates.
-    *
-    * @method Phaser.Physics.Arcade#accelerateToPointer
-    * @param {any} displayObject - The display object to move.
-    * @param {Phaser.Pointer} [pointer] - The pointer to move towards. Defaults to Phaser.Input.activePointer.
-    * @param {number} [speed=60] - The speed it will accelerate in pixels per second.
-    * @param {number} [xSpeedMax=500] - The maximum x velocity the display object can reach.
-    * @param {number} [ySpeedMax=500] - The maximum y velocity the display object can reach.
-    * @return {number} The angle (in radians) that the object should be visually set to in order to match its new trajectory.
-    */
-    accelerateToPointer: function (displayObject, pointer, speed, xSpeedMax, ySpeedMax) {
-
-        if (typeof speed === 'undefined') { speed = 60; }
-        if (typeof pointer === 'undefined') { pointer = this.game.input.activePointer; }
-        if (typeof xSpeedMax === 'undefined') { xSpeedMax = 1000; }
-        if (typeof ySpeedMax === 'undefined') { ySpeedMax = 1000; }
-
-        this._angle = this.angleToPointer(displayObject, pointer);
-
-        displayObject.body.acceleration.setTo(Math.cos(this._angle) * speed, Math.sin(this._angle) * speed);
-        displayObject.body.maxVelocity.setTo(xSpeedMax, ySpeedMax);
-
-        return this._angle;
-
-    },
-
-    /**
-    * Sets the acceleration.x/y property on the display object so it will move towards the x/y coordinates at the given speed (in pixels per second sq.)
-    * You must give a maximum speed value, beyond which the display object won't go any faster.
-    * Note: The display object does not continuously track the target. If the target changes location during transit the display object will not modify its course.
-    * Note: The display object doesn't stop moving once it reaches the destination coordinates.
-    *
-    * @method Phaser.Physics.Arcade#accelerateToXY
-    * @param {any} displayObject - The display object to move.
-    * @param {number} x - The x coordinate to accelerate towards.
-    * @param {number} y - The y coordinate to accelerate towards.
-    * @param {number} [speed=60] - The speed it will accelerate in pixels per second.
-    * @param {number} [xSpeedMax=500] - The maximum x velocity the display object can reach.
-    * @param {number} [ySpeedMax=500] - The maximum y velocity the display object can reach.
-    * @return {number} The angle (in radians) that the object should be visually set to in order to match its new trajectory.
-    */
-    accelerateToXY: function (displayObject, x, y, speed, xSpeedMax, ySpeedMax) {
-
-        if (typeof speed === 'undefined') { speed = 60; }
-        if (typeof xSpeedMax === 'undefined') { xSpeedMax = 1000; }
-        if (typeof ySpeedMax === 'undefined') { ySpeedMax = 1000; }
-
-        this._angle = this.angleToXY(displayObject, x, y);
-
-        displayObject.body.acceleration.setTo(Math.cos(this._angle) * speed, Math.sin(this._angle) * speed);
-        displayObject.body.maxVelocity.setTo(xSpeedMax, ySpeedMax);
-
-        return this._angle;
-
-    },
-
-    /**
-    * Find the distance between two display objects (like Sprites).
-    *
-    * @method Phaser.Physics.Arcade#distanceBetween
-    * @param {any} source - The Display Object to test from.
-    * @param {any} target - The Display Object to test to.
-    * @return {number} The distance between the source and target objects.
-    */
-    distanceBetween: function (source, target) {
-
-        this._dx = source.x - target.x;
-        this._dy = source.y - target.y;
-
-        return Math.sqrt(this._dx * this._dx + this._dy * this._dy);
-
-    },
-
-    /**
-    * Find the distance between a display object (like a Sprite) and the given x/y coordinates.
-    * The calculation is made from the display objects x/y coordinate. This may be the top-left if its anchor hasn't been changed.
-    * If you need to calculate from the center of a display object instead use the method distanceBetweenCenters()
-    *
-    * @method Phaser.Physics.Arcade#distanceToXY
-    * @param {any} displayObject - The Display Object to test from.
-    * @param {number} x - The x coordinate to move towards.
-    * @param {number} y - The y coordinate to move towards.
-    * @return {number} The distance between the object and the x/y coordinates.
-    */
-    distanceToXY: function (displayObject, x, y) {
-
-        this._dx = displayObject.x - x;
-        this._dy = displayObject.y - y;
-
-        return Math.sqrt(this._dx * this._dx + this._dy * this._dy);
-
-    },
-
-    /**
-    * Find the distance between a display object (like a Sprite) and a Pointer. If no Pointer is given the Input.activePointer is used.
-    * The calculation is made from the display objects x/y coordinate. This may be the top-left if its anchor hasn't been changed.
-    * If you need to calculate from the center of a display object instead use the method distanceBetweenCenters()
-    *
-    * @method Phaser.Physics.Arcade#distanceToPointer
-    * @param {any} displayObject - The Display Object to test from.
-    * @param {Phaser.Pointer} [pointer] - The Phaser.Pointer to test to. If none is given then Input.activePointer is used.
-    * @return {number} The distance between the object and the Pointer.
-    */
-    distanceToPointer: function (displayObject, pointer) {
-
-        pointer = pointer || this.game.input.activePointer;
-
-        this._dx = displayObject.x - pointer.x;
-        this._dy = displayObject.y - pointer.y;
-
-        return Math.sqrt(this._dx * this._dx + this._dy * this._dy);
-
-    },
-
-    /**
-    * Find the angle in radians between two display objects (like Sprites).
-    *
-    * @method Phaser.Physics.Arcade#angleBetween
-    * @param {any} source - The Display Object to test from.
-    * @param {any} target - The Display Object to test to.
-    * @return {number} The angle in radians between the source and target display objects.
-    */
-    angleBetween: function (source, target) {
-
-        this._dx = target.x - source.x;
-        this._dy = target.y - source.y;
-
-        return Math.atan2(this._dy, this._dx);
-
-    },
-
-    /**
-    * Find the angle in radians between a display object (like a Sprite) and the given x/y coordinate.
-    *
-    * @method Phaser.Physics.Arcade#angleToXY
-    * @param {any} displayObject - The Display Object to test from.
-    * @param {number} x - The x coordinate to get the angle to.
-    * @param {number} y - The y coordinate to get the angle to.
-    * @return {number} The angle in radians between displayObject.x/y to Pointer.x/y
-    */
-    angleToXY: function (displayObject, x, y) {
-
-        this._dx = x - displayObject.x;
-        this._dy = y - displayObject.y;
-
-        return Math.atan2(this._dy, this._dx);
-
-    },
-
-    /**
-    * Find the angle in radians between a display object (like a Sprite) and a Pointer, taking their x/y and center into account.
-    *
-    * @method Phaser.Physics.Arcade#angleToPointer
-    * @param {any} displayObject - The Display Object to test from.
-    * @param {Phaser.Pointer} [pointer] - The Phaser.Pointer to test to. If none is given then Input.activePointer is used.
-    * @return {number} The angle in radians between displayObject.x/y to Pointer.x/y
-    */
-    angleToPointer: function (displayObject, pointer) {
-
-        pointer = pointer || this.game.input.activePointer;
-
-        this._dx = pointer.worldX - displayObject.x;
-        this._dy = pointer.worldY - displayObject.y;
-
-        return Math.atan2(this._dy, this._dx);
-
     }
 
-};
+});
+
+module.exports = World;

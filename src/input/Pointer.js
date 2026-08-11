@@ -1,867 +1,1327 @@
 /**
-* @author       Richard Davey <rich@photonstorm.com>
-* @copyright    2014 Photon Storm Ltd.
-* @license      {@link https://github.com/photonstorm/phaser/blob/master/license.txt|MIT License}
-*/
+ * @author       Richard Davey <rich@phaser.io>
+ * @copyright    2013-2026 Phaser Studio Inc.
+ * @license      {@link https://opensource.org/licenses/MIT|MIT License}
+ */
+
+var Angle = require('../math/angle/Between');
+var Class = require('../utils/Class');
+var Distance = require('../math/distance/DistanceBetween');
+var FuzzyEqual = require('../math/fuzzy/Equal');
+var SmoothStepInterpolation = require('../math/interpolation/SmoothStepInterpolation');
+var Vector2 = require('../math/Vector2');
+var OS = require('../device/OS');
 
 /**
-* A Pointer object is used by the Mouse, Touch and MSPoint managers and represents a single finger on the touch screen.
-*
-* @class Phaser.Pointer
-* @constructor
-* @param {Phaser.Game} game - A reference to the currently running game.
-* @param {number} id - The ID of the Pointer object within the game. Each game can have up to 10 active pointers.
-*/
-Phaser.Pointer = function (game, id) {
+ * @classdesc
+ * A Pointer object encapsulates both mouse and touch input within Phaser.
+ *
+ * By default, Phaser will create 2 pointers for your game to use. If you require more, i.e. for a multi-touch
+ * game, then use the `InputPlugin.addPointer` method to do so, rather than instantiating this class directly,
+ * otherwise it won't be managed by the input system.
+ *
+ * You can reference the current active pointer via `InputPlugin.activePointer`. You can also use the properties
+ * `InputPlugin.pointer1` through to `pointer10`, for each pointer you have enabled in your game.
+ *
+ * The properties of this object are set by the Input Plugin during processing. This object is then sent in all
+ * input related events that the Input Plugin emits, so you can reference properties from it directly in your
+ * callbacks.
+ *
+ * @class Pointer
+ * @memberof Phaser.Input
+ * @constructor
+ * @since 3.0.0
+ *
+ * @param {Phaser.Input.InputManager} manager - A reference to the Input Manager.
+ * @param {number} id - The internal ID of this Pointer.
+ */
+var Pointer = new Class({
 
-    /**
-    * @property {Phaser.Game} game - A reference to the currently running game.
-    */
-    this.game = game;
+    initialize:
 
-    /**
-    * @property {number} id - The ID of the Pointer object within the game. Each game can have up to 10 active pointers.
-    */
-    this.id = id;
-
-    /**
-    * @property {number} type - The const type of this object.
-    * @readonly
-    */
-    this.type = Phaser.POINTER;
-
-    /**
-    * @property {boolean} exists - A Pointer object that exists is allowed to be checked for physics collisions and overlaps.
-    * @default
-    */
-    this.exists = true;
-
-    /**
-    * @property {number} identifier - The identifier property of the Pointer as set by the DOM event when this Pointer is started.
-    * @default
-    */
-    this.identifier = 0;
-
-    /**
-    * @property {number} pointerId - The pointerId property of the Pointer as set by the DOM event when this Pointer is started. The browser can and will recycle this value.
-    * @default
-    */
-    this.pointerId = null;
-
-    /**
-    * @property {any} target - The target property of the Pointer as set by the DOM event when this Pointer is started.
-    * @default
-    */
-    this.target = null;
-
-    /**
-    * @property {any} button - The button property of the Pointer as set by the DOM event when this Pointer is started.
-    * @default
-    */
-    this.button = null;
-
-    /**
-    * @property {boolean} _holdSent - Local private variable to store the status of dispatching a hold event.
-    * @private
-    * @default
-    */
-    this._holdSent = false;
-
-    /**
-    * @property {array} _history - Local private variable storing the short-term history of pointer movements.
-    * @private
-    */
-    this._history = [];
-
-    /**
-    * @property {number} _nextDrop - Local private variable storing the time at which the next history drop should occur.
-    * @private
-    */
-    this._nextDrop = 0;
-
-    /**
-    * @property {boolean} _stateReset - Monitor events outside of a state reset loop.
-    * @private
-    */
-    this._stateReset = false;
-
-    /**
-    * @property {boolean} withinGame - true if the Pointer is over the game canvas, otherwise false.
-    */
-    this.withinGame = false;
-
-    /**
-    * @property {number} clientX - The horizontal coordinate of the Pointer within the application's client area at which the event occurred (as opposed to the coordinates within the page).
-    */
-    this.clientX = -1;
-
-    /**
-    * @property {number} clientY - The vertical coordinate of the Pointer within the application's client area at which the event occurred (as opposed to the coordinates within the page).
-    */
-    this.clientY = -1;
-
-    /**
-    * @property {number} pageX - The horizontal coordinate of the Pointer relative to whole document.
-    */
-    this.pageX = -1;
-
-    /**
-    * @property {number} pageY - The vertical coordinate of the Pointer relative to whole document.
-    */
-    this.pageY = -1;
-
-    /**
-    * @property {number} screenX - The horizontal coordinate of the Pointer relative to the screen.
-    */
-    this.screenX = -1;
-
-    /**
-    * @property {number} screenY - The vertical coordinate of the Pointer relative to the screen.
-    */
-    this.screenY = -1;
-
-    /**
-    * @property {number} rawMovementX - The horizontal raw relative movement of the Pointer in pixels since last event.
-    * @default
-    */
-    this.rawMovementX = 0;
-
-    /**
-    * @property {number} rawMovementY - The vertical raw relative movement of the Pointer in pixels since last event.
-    * @default
-    */
-    this.rawMovementY = 0;
-
-    /**
-    * @property {number} movementX - The horizontal processed relative movement of the Pointer in pixels since last event.
-    * @default
-    */
-    this.movementX = 0;
-
-    /**
-    * @property {number} movementY - The vertical processed relative movement of the Pointer in pixels since last event.
-    * @default
-    */
-    this.movementY = 0;
-
-    /**
-    * @property {number} x - The horizontal coordinate of the Pointer. This value is automatically scaled based on the game scale.
-    * @default
-    */
-    this.x = -1;
-
-    /**
-    * @property {number} y - The vertical coordinate of the Pointer. This value is automatically scaled based on the game scale.
-    * @default
-    */
-    this.y = -1;
-
-    /**
-    * @property {boolean} isMouse - If the Pointer is a mouse this is true, otherwise false.
-    * @default
-    */
-    this.isMouse = false;
-
-    /**
-    * @property {boolean} isDown - If the Pointer is touching the touchscreen, or the mouse button is held down, isDown is set to true.
-    * @default
-    */
-    this.isDown = false;
-
-    /**
-    * @property {boolean} isUp - If the Pointer is not touching the touchscreen, or the mouse button is up, isUp is set to true.
-    * @default
-    */
-    this.isUp = true;
-
-    /**
-    * @property {number} timeDown - A timestamp representing when the Pointer first touched the touchscreen.
-    * @default
-    */
-    this.timeDown = 0;
-
-    /**
-    * @property {number} timeUp - A timestamp representing when the Pointer left the touchscreen.
-    * @default
-    */
-    this.timeUp = 0;
-
-    /**
-    * @property {number} previousTapTime - A timestamp representing when the Pointer was last tapped or clicked.
-    * @default
-    */
-    this.previousTapTime = 0;
-
-    /**
-    * @property {number} totalTouches - The total number of times this Pointer has been touched to the touchscreen.
-    * @default
-    */
-    this.totalTouches = 0;
-
-    /**
-    * @property {number} msSinceLastClick - The number of milliseconds since the last click or touch event.
-    * @default
-    */
-    this.msSinceLastClick = Number.MAX_VALUE;
-
-    /**
-    * @property {any} targetObject - The Game Object this Pointer is currently over / touching / dragging.
-    * @default
-    */
-    this.targetObject = null;
-
-    /**
-    * @property {boolean} active - An active pointer is one that is currently pressed down on the display. A Mouse is always active.
-    * @default
-    */
-    this.active = false;
-
-    /**
-    * @property {boolean} dirty - A dirty pointer needs to re-poll any interactive objects it may have been over, regardless if it has moved or not.
-    * @default
-    */
-    this.dirty = false;
-
-    /**
-    * @property {Phaser.Point} position - A Phaser.Point object containing the current x/y values of the pointer on the display.
-    */
-    this.position = new Phaser.Point();
-
-    /**
-    * @property {Phaser.Point} positionDown - A Phaser.Point object containing the x/y values of the pointer when it was last in a down state on the display.
-    */
-    this.positionDown = new Phaser.Point();
-    
-    /**
-    * @property {Phaser.Point} positionUp - A Phaser.Point object containing the x/y values of the pointer when it was last released.
-    */
-    this.positionUp = new Phaser.Point();
-
-    /**
-    * A Phaser.Circle that is centered on the x/y coordinates of this pointer, useful for hit detection.
-    * The Circle size is 44px (Apples recommended "finger tip" size).
-    * @property {Phaser.Circle} circle
-    */
-    this.circle = new Phaser.Circle(0, 0, 44);
-
-    if (id === 0)
+    function Pointer (manager, id)
     {
-        this.isMouse = true;
-    }
-
-    /**
-    * Click trampolines associated with this pointer. See `addClickTrampoline`.
-    * @property {object[]|null} _clickTrampolines
-    * @private
-    */
-    this._clickTrampolines = null;
-
-    /**
-    * When the Pointer has click trampolines the last target object is stored here
-    * so it can be used to check for validity of the trampoline in a post-Up/'stop'.
-    * @property {object} _trampolineTargetObject
-    * @private
-    */
-    this._trampolineTargetObject = null;
-
-};
-
-Phaser.Pointer.prototype = {
-
-    /**
-    * Called when the Pointer is pressed onto the touchscreen.
-    * @method Phaser.Pointer#start
-    * @param {any} event - The DOM event from the browser.
-    */
-    start: function (event) {
-
-        if (event['pointerId'])
-        {
-            this.pointerId = event.pointerId;
-        }
-
-        this.identifier = event.identifier;
-        this.target = event.target;
-
-        if (typeof event.button !== 'undefined')
-        {
-            this.button = event.button;
-        }
-
-        this._history = [];
-        this.active = true;
-        this.withinGame = true;
-        this.isDown = true;
-        this.isUp = false;
-        this.dirty = false;
-        this._clickTrampolines = null;
-        this._trampolineTargetObject = null;
-
-        //  Work out how long it has been since the last click
-        this.msSinceLastClick = this.game.time.time - this.timeDown;
-        this.timeDown = this.game.time.time;
-        this._holdSent = false;
-
-        //  This sets the x/y and other local values
-        this.move(event, true);
-
-        // x and y are the old values here?
-        this.positionDown.setTo(this.x, this.y);
-
-        if (this.game.input.multiInputOverride === Phaser.Input.MOUSE_OVERRIDES_TOUCH || this.game.input.multiInputOverride === Phaser.Input.MOUSE_TOUCH_COMBINE || (this.game.input.multiInputOverride === Phaser.Input.TOUCH_OVERRIDES_MOUSE && this.game.input.currentPointers === 0))
-        {
-            this.game.input.x = this.x;
-            this.game.input.y = this.y;
-            this.game.input.position.setTo(this.x, this.y);
-            this.game.input.onDown.dispatch(this, event);
-            this.game.input.resetSpeed(this.x, this.y);
-        }
-
-        this._stateReset = false;
-        this.totalTouches++;
-
-        if (!this.isMouse)
-        {
-            this.game.input.currentPointers++;
-        }
-
-        if (this.targetObject !== null)
-        {
-            this.targetObject._touchedHandler(this);
-        }
-
-        return this;
-
-    },
-
-    /**
-    * Called by the Input Manager.
-    * @method Phaser.Pointer#update
-    */
-    update: function () {
-
-        if (this.active)
-        {
-            //  Force a check?
-            if (this.dirty)
-            {
-                if (this.game.input.interactiveItems.total > 0)
-                {
-                    this.processInteractiveObjects(false);
-                }
-
-                this.dirty = false;
-            }
-
-            if (this._holdSent === false && this.duration >= this.game.input.holdRate)
-            {
-                if (this.game.input.multiInputOverride == Phaser.Input.MOUSE_OVERRIDES_TOUCH || this.game.input.multiInputOverride == Phaser.Input.MOUSE_TOUCH_COMBINE || (this.game.input.multiInputOverride == Phaser.Input.TOUCH_OVERRIDES_MOUSE && this.game.input.currentPointers === 0))
-                {
-                    this.game.input.onHold.dispatch(this);
-                }
-
-                this._holdSent = true;
-            }
-
-            //  Update the droppings history
-            if (this.game.input.recordPointerHistory && this.game.time.time >= this._nextDrop)
-            {
-                this._nextDrop = this.game.time.time + this.game.input.recordRate;
-
-                this._history.push({
-                    x: this.position.x,
-                    y: this.position.y
-                });
-
-                if (this._history.length > this.game.input.recordLimit)
-                {
-                    this._history.shift();
-                }
-            }
-        }
-
-    },
-
-    /**
-    * Called when the Pointer is moved.
-    * 
-    * @method Phaser.Pointer#move
-    * @param {MouseEvent|PointerEvent|TouchEvent} event - The event passed up from the input handler.
-    * @param {boolean} [fromClick=false] - Was this called from the click event?
-    */
-    move: function (event, fromClick) {
-
-        if (this.game.input.pollLocked)
-        {
-            return;
-        }
-
-        if (typeof fromClick === 'undefined') { fromClick = false; }
-
-        if (typeof event.button !== 'undefined')
-        {
-            this.button = event.button;
-        }
-
-        this.clientX = event.clientX;
-        this.clientY = event.clientY;
-
-        this.pageX = event.pageX;
-        this.pageY = event.pageY;
-
-        this.screenX = event.screenX;
-        this.screenY = event.screenY;
-
-        if (this.isMouse && this.game.input.mouse.locked && !fromClick)
-        {
-            this.rawMovementX = event.movementX || event.mozMovementX || event.webkitMovementX || 0;
-            this.rawMovementY = event.movementY || event.mozMovementY || event.webkitMovementY || 0;
-
-            this.movementX += this.rawMovementX;
-            this.movementY += this.rawMovementY;
-        }
-
-        this.x = (this.pageX - this.game.scale.offset.x) * this.game.input.scale.x;
-        this.y = (this.pageY - this.game.scale.offset.y) * this.game.input.scale.y;
-
-        this.position.setTo(this.x, this.y);
-        this.circle.x = this.x;
-        this.circle.y = this.y;
-
-        if (this.game.input.multiInputOverride === Phaser.Input.MOUSE_OVERRIDES_TOUCH || this.game.input.multiInputOverride === Phaser.Input.MOUSE_TOUCH_COMBINE || (this.game.input.multiInputOverride === Phaser.Input.TOUCH_OVERRIDES_MOUSE && this.game.input.currentPointers === 0))
-        {
-            this.game.input.activePointer = this;
-            this.game.input.x = this.x;
-            this.game.input.y = this.y;
-            this.game.input.position.setTo(this.game.input.x, this.game.input.y);
-            this.game.input.circle.x = this.game.input.x;
-            this.game.input.circle.y = this.game.input.y;
-        }
-
-        this.withinGame = this.game.scale.bounds.contains(this.pageX, this.pageY);
-
-        //  If the game is paused we don't process any target objects or callbacks
-        if (this.game.paused)
-        {
-            return this;
-        }
-
-        var i = this.game.input.moveCallbacks.length;
-
-        while (i--)
-        {
-            this.game.input.moveCallbacks[i].callback.call(this.game.input.moveCallbacks[i].context, this, this.x, this.y, fromClick);
-        }
-
-        //  Easy out if we're dragging something and it still exists
-        if (this.targetObject !== null && this.targetObject.isDragged === true)
-        {
-            if (this.targetObject.update(this) === false)
-            {
-                this.targetObject = null;
-            }
-        }
-        else if (this.game.input.interactiveItems.total > 0)
-        {
-            this.processInteractiveObjects(fromClick);
-        }
-
-        return this;
-
-    },
-
-    /**
-    * Process all interactive objects to find out which ones were updated in the recent Pointer move.
-    * 
-    * @method Phaser.Pointer#processInteractiveObjects
-    * @protected
-    * @param {boolean} [fromClick=false] - Was this called from the click event?
-    * @return {boolean} True if this method processes an object (i.e. a Sprite becomes the Pointers currentTarget), otherwise false.
-    */
-    processInteractiveObjects: function (fromClick) {
-
-        //  Work out which object is on the top
-        var highestRenderOrderID = Number.MAX_VALUE;
-        var highestInputPriorityID = -1;
-        var candidateTarget = null;
-
-        //  First pass gets all objects that the pointer is over that DON'T use pixelPerfect checks and get the highest ID
-        //  We know they'll be valid for input detection but not which is the top just yet
-
-        var currentNode = this.game.input.interactiveItems.first;
-
-        while (currentNode)
-        {
-            //  Reset checked status
-            currentNode.checked = false;
-
-            if (currentNode.validForInput(highestInputPriorityID, highestRenderOrderID, false))
-            {
-                //  Flag it as checked so we don't re-scan it on the next phase
-                currentNode.checked = true;
-
-                if ((fromClick && currentNode.checkPointerDown(this, true)) ||
-                    (!fromClick && currentNode.checkPointerOver(this, true)))
-                {
-                    highestRenderOrderID = currentNode.sprite._cache[3]; // renderOrderID
-                    highestInputPriorityID = currentNode.priorityID;
-                    candidateTarget = currentNode;
-                }
-            }
-
-            currentNode = this.game.input.interactiveItems.next;
-        }
-
-        //  Then in the second sweep we process ONLY the pixel perfect ones that are checked and who have a higher ID
-        //  because if their ID is lower anyway then we can just automatically discount them
-        //  (A node that was previously checked did not request a pixel-perfect check.)
-
-        var currentNode = this.game.input.interactiveItems.first;
-
-        while(currentNode)
-        {
-            if (!currentNode.checked &&
-                currentNode.validForInput(highestInputPriorityID, highestRenderOrderID, true))
-            {
-                if ((fromClick && currentNode.checkPointerDown(this, false)) ||
-                    (!fromClick && currentNode.checkPointerOver(this, false)))
-                {
-                    highestRenderOrderID = currentNode.sprite._cache[3]; // renderOrderID
-                    highestInputPriorityID = currentNode.priorityID;
-                    candidateTarget = currentNode;
-                }
-            }
-
-            currentNode = this.game.input.interactiveItems.next;
-        }
-
-        //  Now we know the top-most item (if any) we can process it
-        if (candidateTarget === null)
-        {
-            //  The pointer isn't currently over anything, check if we've got a lingering previous target
-            if (this.targetObject)
-            {
-                this.targetObject._pointerOutHandler(this);
-                this.targetObject = null;
-            }
-        }
-        else
-        {
-            if (this.targetObject === null)
-            {
-                //  And now set the new one
-                this.targetObject = candidateTarget;
-                candidateTarget._pointerOverHandler(this);
-            }
-            else
-            {
-                //  We've got a target from the last update
-                if (this.targetObject === candidateTarget)
-                {
-                    //  Same target as before, so update it
-                    if (candidateTarget.update(this) === false)
-                    {
-                        this.targetObject = null;
-                    }
-                }
-                else
-                {
-                    //  The target has changed, so tell the old one we've left it
-                    this.targetObject._pointerOutHandler(this);
-
-                    //  And now set the new one
-                    this.targetObject = candidateTarget;
-                    this.targetObject._pointerOverHandler(this);
-                }
-            }
-        }
-
-        return (this.targetObject !== null);
-
-    },
-
-    /**
-    * Called when the Pointer leaves the target area.
-    *
-    * @method Phaser.Pointer#leave
-    * @param {MouseEvent|PointerEvent|TouchEvent} event - The event passed up from the input handler.
-    */
-    leave: function (event) {
-
-        this.withinGame = false;
-        this.move(event, false);
-
-    },
-
-    /**
-    * Called when the Pointer leaves the touchscreen.
-    *
-    * @method Phaser.Pointer#stop
-    * @param {MouseEvent|PointerEvent|TouchEvent} event - The event passed up from the input handler.
-    */
-    stop: function (event) {
-
-        if (this._stateReset)
-        {
-            event.preventDefault();
-            return;
-        }
-
-        this.timeUp = this.game.time.time;
-
-        if (this.game.input.multiInputOverride === Phaser.Input.MOUSE_OVERRIDES_TOUCH || this.game.input.multiInputOverride === Phaser.Input.MOUSE_TOUCH_COMBINE || (this.game.input.multiInputOverride === Phaser.Input.TOUCH_OVERRIDES_MOUSE && this.game.input.currentPointers === 0))
-        {
-            this.game.input.onUp.dispatch(this, event);
-
-            //  Was it a tap?
-            if (this.duration >= 0 && this.duration <= this.game.input.tapRate)
-            {
-                //  Was it a double-tap?
-                if (this.timeUp - this.previousTapTime < this.game.input.doubleTapRate)
-                {
-                    //  Yes, let's dispatch the signal then with the 2nd parameter set to true
-                    this.game.input.onTap.dispatch(this, true);
-                }
-                else
-                {
-                    //  Wasn't a double-tap, so dispatch a single tap signal
-                    this.game.input.onTap.dispatch(this, false);
-                }
-
-                this.previousTapTime = this.timeUp;
-            }
-        }
-
-        //  Mouse is always active
-        if (this.id > 0)
-        {
-            this.active = false;
-        }
-
-        this.withinGame = false;
+        /**
+         * A reference to the Input Manager.
+         *
+         * @name Phaser.Input.Pointer#manager
+         * @type {Phaser.Input.InputManager}
+         * @since 3.0.0
+         */
+        this.manager = manager;
+
+        /**
+         * The internal ID of this Pointer.
+         *
+         * @name Phaser.Input.Pointer#id
+         * @type {number}
+         * @readonly
+         * @since 3.0.0
+         */
+        this.id = id;
+
+        /**
+         * The most recent native DOM Event this Pointer has processed.
+         *
+         * @name Phaser.Input.Pointer#event
+         * @type {(TouchEvent|MouseEvent|WheelEvent)}
+         * @since 3.0.0
+         */
+        this.event;
+
+        /**
+         * The DOM element the Pointer was pressed down on, taken from the DOM event.
+         * In a default set-up this will be the Canvas that Phaser is rendering to, or the Window element.
+         *
+         * @name Phaser.Input.Pointer#downElement
+         * @type {any}
+         * @readonly
+         * @since 3.16.0
+         */
+        this.downElement;
+
+        /**
+         * The DOM element the Pointer was released on, taken from the DOM event.
+         * In a default set-up this will be the Canvas that Phaser is rendering to, or the Window element.
+         *
+         * @name Phaser.Input.Pointer#upElement
+         * @type {any}
+         * @readonly
+         * @since 3.16.0
+         */
+        this.upElement;
+
+        /**
+         * The camera the Pointer interacted with during its last update.
+         *
+         * A Pointer can only ever interact with one camera at once, which will be the top-most camera
+         * in the list should multiple cameras be positioned on-top of each other.
+         *
+         * @name Phaser.Input.Pointer#camera
+         * @type {Phaser.Cameras.Scene2D.Camera}
+         * @default null
+         * @since 3.0.0
+         */
+        this.camera = null;
+
+        /**
+         * A read-only property that indicates which button was pressed, or released, on the pointer
+         * during the most recent event. It is only set during `up` and `down` events.
+         *
+         * On Touch devices the value is always 0.
+         *
+         * Users may change the configuration of buttons on their pointing device so that if an event's button property
+         * is zero, it may not have been caused by the button that is physically left–most on the pointing device;
+         * however, it should behave as if the left button was clicked in the standard button layout.
+         *
+         * @name Phaser.Input.Pointer#button
+         * @type {number}
+         * @readonly
+         * @default 0
+         * @since 3.18.0
+         */
+        this.button = 0;
+
+        /**
+         * A bitmask representing which mouse buttons are currently held down. The possible values are:
+         *
+         * 0: No button or un-initialized
+         * 1: Left button
+         * 2: Right button
+         * 4: Wheel button or middle button
+         * 8: 4th button (typically the "Browser Back" button)
+         * 16: 5th button (typically the "Browser Forward" button)
+         *
+         * For a mouse configured for left-handed use, the button actions are reversed.
+         * In this case, the values are read from right to left.
+         *
+         * @name Phaser.Input.Pointer#buttons
+         * @type {number}
+         * @default 0
+         * @since 3.0.0
+         */
+        this.buttons = 0;
+
+        /**
+         * The position of the Pointer in screen space.
+         *
+         * @name Phaser.Input.Pointer#position
+         * @type {Phaser.Math.Vector2}
+         * @readonly
+         * @since 3.0.0
+         */
+        this.position = new Vector2();
+
+        /**
+         * The previous position of the Pointer in screen space.
+         *
+         * The old x and y values are stored in here during the InputManager.transformPointer call.
+         *
+         * Use the properties `velocity`, `angle` and `distance` to create your own gesture recognition.
+         *
+         * @name Phaser.Input.Pointer#prevPosition
+         * @type {Phaser.Math.Vector2}
+         * @readonly
+         * @since 3.11.0
+         */
+        this.prevPosition = new Vector2();
+
+        /**
+         * An internal vector used for calculations of the pointer speed and angle.
+         *
+         * @name Phaser.Input.Pointer#midPoint
+         * @type {Phaser.Math.Vector2}
+         * @private
+         * @since 3.16.0
+         */
+        this.midPoint = new Vector2(-1, -1);
+
+        /**
+         * The current velocity of the Pointer, based on its current and previous positions.
+         *
+         * This value is smoothed out each frame, according to the `motionFactor` property.
+         *
+         * This property is updated whenever the Pointer moves, regardless of any button states. In other words,
+         * it changes based on movement alone - a button doesn't have to be pressed first.
+         *
+         * @name Phaser.Input.Pointer#velocity
+         * @type {Phaser.Math.Vector2}
+         * @readonly
+         * @since 3.16.0
+         */
+        this.velocity = new Vector2();
+
+        /**
+         * The current angle the Pointer is moving, in radians, based on its previous and current position.
+         *
+         * The angle is based on the old position facing to the current position.
+         *
+         * This property is updated whenever the Pointer moves, regardless of any button states. In other words,
+         * it changes based on movement alone - a button doesn't have to be pressed first.
+         *
+         * @name Phaser.Input.Pointer#angle
+         * @type {number}
+         * @readonly
+         * @since 3.16.0
+         */
+        this.angle = 0;
+
+        /**
+         * The distance the Pointer has moved, based on its previous and current position.
+         *
+         * This value is smoothed out each frame, according to the `motionFactor` property.
+         *
+         * This property is updated whenever the Pointer moves, regardless of any button states. In other words,
+         * it changes based on movement alone - a button doesn't have to be pressed first.
+         *
+         * If you need the total distance travelled since the primary button was pressed down,
+         * then use the `Pointer.getDistance` method.
+         *
+         * @name Phaser.Input.Pointer#distance
+         * @type {number}
+         * @readonly
+         * @since 3.16.0
+         */
+        this.distance = 0;
+
+        /**
+         * The smoothing factor to apply to the Pointer position.
+         *
+         * Due to their nature, pointer positions are inherently noisy. While this is fine for lots of games, if you need cleaner positions
+         * then you can set this value to apply an automatic smoothing to the positions as they are recorded.
+         *
+         * The default value of zero means 'no smoothing'.
+         * Set to a small value, such as 0.2, to apply an average level of smoothing between positions. You can do this by changing this
+         * value directly, or by setting the `input.smoothFactor` property in the Game Config.
+         *
+         * Positions are only smoothed when the pointer moves. If the primary button on this Pointer enters an Up or Down state, then the position
+         * is always precise, and not smoothed.
+         *
+         * @name Phaser.Input.Pointer#smoothFactor
+         * @type {number}
+         * @default 0
+         * @since 3.16.0
+         */
+        this.smoothFactor = 0;
+
+        /**
+         * The factor applied to the motion smoothing each frame.
+         *
+         * This value is passed to the Smooth Step Interpolation that is used to calculate the velocity,
+         * angle and distance of the Pointer. It's applied every frame, until the midPoint reaches the current
+         * position of the Pointer. 0.2 provides a good average but can be increased if you need a
+         * quicker update and are working in a high performance environment. Never set this value to
+         * zero.
+         *
+         * @name Phaser.Input.Pointer#motionFactor
+         * @type {number}
+         * @default 0.2
+         * @since 3.16.0
+         */
+        this.motionFactor = 0.2;
+
+        /**
+         * The x position of this Pointer, translated into the coordinate space of the most recent Camera it interacted with.
+         *
+         * If you wish to use this value _outside_ of an input event handler then you should update it first by calling
+         * the `Pointer.updateWorldPoint` method.
+         *
+         * @name Phaser.Input.Pointer#worldX
+         * @type {number}
+         * @default 0
+         * @since 3.10.0
+         */
+        this.worldX = 0;
+
+        /**
+         * The y position of this Pointer, translated into the coordinate space of the most recent Camera it interacted with.
+         *
+         * If you wish to use this value _outside_ of an input event handler then you should update it first by calling
+         * the `Pointer.updateWorldPoint` method.
+         *
+         * @name Phaser.Input.Pointer#worldY
+         * @type {number}
+         * @default 0
+         * @since 3.10.0
+         */
+        this.worldY = 0;
+
+        /**
+         * Time when this Pointer was most recently moved (regardless of the state of its buttons, if any).
+         *
+         * @name Phaser.Input.Pointer#moveTime
+         * @type {number}
+         * @default 0
+         * @since 3.0.0
+         */
+        this.moveTime = 0;
+
+        /**
+         * X coordinate of the Pointer when Button 1 (left button), or Touch, was pressed, used for dragging objects.
+         *
+         * @name Phaser.Input.Pointer#downX
+         * @type {number}
+         * @default 0
+         * @since 3.0.0
+         */
+        this.downX = 0;
+
+        /**
+         * Y coordinate of the Pointer when Button 1 (left button), or Touch, was pressed, used for dragging objects.
+         *
+         * @name Phaser.Input.Pointer#downY
+         * @type {number}
+         * @default 0
+         * @since 3.0.0
+         */
+        this.downY = 0;
+
+        /**
+         * The Event timestamp when the first button, or Touch input, was pressed. Used for dragging objects.
+         *
+         * @name Phaser.Input.Pointer#downTime
+         * @type {number}
+         * @default 0
+         * @since 3.0.0
+         */
+        this.downTime = 0;
+
+        /**
+         * X coordinate of the Pointer when Button 1 (left button), or Touch, was released, used for dragging objects.
+         *
+         * @name Phaser.Input.Pointer#upX
+         * @type {number}
+         * @default 0
+         * @since 3.0.0
+         */
+        this.upX = 0;
+
+        /**
+         * Y coordinate of the Pointer when Button 1 (left button), or Touch, was released, used for dragging objects.
+         *
+         * @name Phaser.Input.Pointer#upY
+         * @type {number}
+         * @default 0
+         * @since 3.0.0
+         */
+        this.upY = 0;
+
+        /**
+         * The Event timestamp when the final button, or Touch input, was released. Used for dragging objects.
+         *
+         * @name Phaser.Input.Pointer#upTime
+         * @type {number}
+         * @default 0
+         * @since 3.0.0
+         */
+        this.upTime = 0;
+
+        /**
+         * Is the primary button down? (usually button 0, the left mouse button)
+         *
+         * @name Phaser.Input.Pointer#primaryDown
+         * @type {boolean}
+         * @default false
+         * @since 3.0.0
+         */
+        this.primaryDown = false;
+
+        /**
+         * Is _any_ button on this pointer considered as being down?
+         *
+         * @name Phaser.Input.Pointer#isDown
+         * @type {boolean}
+         * @default false
+         * @since 3.0.0
+         */
         this.isDown = false;
-        this.isUp = true;
+
+        /**
+         * Did the previous input event come from a Touch input (true) or Mouse? (false)
+         *
+         * @name Phaser.Input.Pointer#wasTouch
+         * @type {boolean}
+         * @default false
+         * @since 3.0.0
+         */
+        this.wasTouch = false;
+
+        /**
+         * Did this Pointer get canceled by a touchcancel event?
+         *
+         * Note: "canceled" is the American-English spelling of "cancelled". Please don't submit PRs correcting it!
+         *
+         * @name Phaser.Input.Pointer#wasCanceled
+         * @type {boolean}
+         * @default false
+         * @since 3.15.0
+         */
+        this.wasCanceled = false;
+
+        /**
+         * If the mouse is locked, the horizontal relative movement of the Pointer in pixels since last frame.
+         *
+         * @name Phaser.Input.Pointer#movementX
+         * @type {number}
+         * @default 0
+         * @since 3.0.0
+         */
+        this.movementX = 0;
+
+        /**
+         * If the mouse is locked, the vertical relative movement of the Pointer in pixels since last frame.
+         *
+         * @name Phaser.Input.Pointer#movementY
+         * @type {number}
+         * @default 0
+         * @since 3.0.0
+         */
+        this.movementY = 0;
+
+        /**
+         * The identifier property of the Pointer as set by the DOM event when this Pointer is started.
+         *
+         * @name Phaser.Input.Pointer#identifier
+         * @type {number}
+         * @since 3.10.0
+         */
+        this.identifier = 0;
+
+        /**
+         * The pointerId property of the Pointer as set by the DOM event when this Pointer is started.
+         * The browser can and will recycle this value.
+         *
+         * @name Phaser.Input.Pointer#pointerId
+         * @type {number}
+         * @since 3.10.0
+         */
         this.pointerId = null;
-        this.identifier = null;
-        
-        this.positionUp.setTo(this.x, this.y);
-        
-        if (this.isMouse === false)
-        {
-            this.game.input.currentPointers--;
-        }
 
-        this.game.input.interactiveItems.callAll('_releasedHandler', this);
+        /**
+         * An active Pointer is one that is currently pressed down on the display.
+         * A Mouse is always considered as active.
+         *
+         * @name Phaser.Input.Pointer#active
+         * @type {boolean}
+         * @since 3.10.0
+         */
+        this.active = (id === 0) ? true : false;
 
-        if (this._clickTrampolines)
-        {
-            this._trampolineTargetObject = this.targetObject;
-        }
-        this.targetObject = null;
+        /**
+         * Is this pointer Pointer Locked?
+         *
+         * Only a mouse pointer can be locked and it only becomes locked when requested via
+         * the browsers Pointer Lock API.
+         *
+         * You can request this by calling the `this.input.mouse.requestPointerLock()` method from
+         * a `pointerdown` or `pointerup` event handler.
+         *
+         * @name Phaser.Input.Pointer#locked
+         * @readonly
+         * @type {boolean}
+         * @since 3.19.0
+         */
+        this.locked = false;
+
+        /**
+         * The horizontal scroll amount that occurred due to the user moving a mouse wheel or similar input device.
+         *
+         * @name Phaser.Input.Pointer#deltaX
+         * @type {number}
+         * @default 0
+         * @since 3.18.0
+         */
+        this.deltaX = 0;
+
+        /**
+         * The vertical scroll amount that occurred due to the user moving a mouse wheel or similar input device.
+         * This value will typically be less than 0 if the user scrolls up and greater than zero if scrolling down.
+         *
+         * @name Phaser.Input.Pointer#deltaY
+         * @type {number}
+         * @default 0
+         * @since 3.18.0
+         */
+        this.deltaY = 0;
+
+        /**
+         * The z-axis scroll amount that occurred due to the user moving a mouse wheel or similar input device.
+         *
+         * @name Phaser.Input.Pointer#deltaZ
+         * @type {number}
+         * @default 0
+         * @since 3.18.0
+         */
+        this.deltaZ = 0;
+    },
+
+    /**
+     * Takes a Camera and updates this Pointer's `worldX` and `worldY` values so they are
+     * the result of a translation through the given Camera.
+     *
+     * Note that the values will be automatically replaced the moment the Pointer is
+     * updated by an input event, such as a mouse move, so should be used immediately.
+     *
+     * @method Phaser.Input.Pointer#updateWorldPoint
+     * @since 3.19.0
+     *
+     * @param {Phaser.Cameras.Scene2D.Camera} camera - The Camera which is being tested against.
+     *
+     * @return {this} This Pointer object.
+     */
+    updateWorldPoint: function (camera)
+    {
+        //  Stores the world point inside of tempPoint
+        var temp = camera.getWorldPoint(this.x, this.y);
+
+        this.worldX = temp.x;
+        this.worldY = temp.y;
 
         return this;
-
     },
 
     /**
-    * The Pointer is considered justPressed if the time it was pressed onto the touchscreen or clicked is less than justPressedRate.
-    * Note that calling justPressed doesn't reset the pressed status of the Pointer, it will return `true` for as long as the duration is valid.
-    * If you wish to check if the Pointer was pressed down just once then see the Sprite.events.onInputDown event.
-    * @method Phaser.Pointer#justPressed
-    * @param {number} [duration] - The time to check against. If none given it will use InputManager.justPressedRate.
-    * @return {boolean} true if the Pointer was pressed down within the duration given.
-    */
-    justPressed: function (duration) {
-
-        duration = duration || this.game.input.justPressedRate;
-
-        return (this.isDown === true && (this.timeDown + duration) > this.game.time.time);
-
+     * Takes a Camera and returns a Vector2 containing the translated position of this Pointer
+     * within that Camera. This can be used to convert this Pointers position into camera space.
+     *
+     * @method Phaser.Input.Pointer#positionToCamera
+     * @since 3.0.0
+     *
+     * @param {Phaser.Cameras.Scene2D.Camera} camera - The Camera to use for the translation.
+     * @param {(Phaser.Math.Vector2|object)} [output] - A Vector2-like object in which to store the translated position.
+     *
+     * @return {(Phaser.Math.Vector2|object)} A Vector2 containing the translated coordinates of this Pointer, based on the given camera.
+     */
+    positionToCamera: function (camera, output)
+    {
+        return camera.getWorldPoint(this.x, this.y, output);
     },
 
     /**
-    * The Pointer is considered justReleased if the time it left the touchscreen is less than justReleasedRate.
-    * Note that calling justReleased doesn't reset the pressed status of the Pointer, it will return `true` for as long as the duration is valid.
-    * If you wish to check if the Pointer was released just once then see the Sprite.events.onInputUp event.
-    * @method Phaser.Pointer#justReleased
-    * @param {number} [duration] - The time to check against. If none given it will use InputManager.justReleasedRate.
-    * @return {boolean} true if the Pointer was released within the duration given.
-    */
-    justReleased: function (duration) {
+     * Calculates the motion of this Pointer, including its velocity and angle of movement.
+     * This method is called automatically each frame by the Input Manager.
+     *
+     * @method Phaser.Input.Pointer#updateMotion
+     * @private
+     * @since 3.16.0
+     */
+    updateMotion: function ()
+    {
+        var cx = this.position.x;
+        var cy = this.position.y;
 
-        duration = duration || this.game.input.justReleasedRate;
+        var mx = this.midPoint.x;
+        var my = this.midPoint.y;
 
-        return (this.isUp === true && (this.timeUp + duration) > this.game.time.time);
+        if (cx === mx && cy === my)
+        {
+            //  Nothing to do here
+            return;
+        }
 
+        //  Moving towards our goal ...
+        var vx = SmoothStepInterpolation(this.motionFactor, mx, cx);
+        var vy = SmoothStepInterpolation(this.motionFactor, my, cy);
+
+        if (FuzzyEqual(vx, cx, 0.1))
+        {
+            vx = cx;
+        }
+
+        if (FuzzyEqual(vy, cy, 0.1))
+        {
+            vy = cy;
+        }
+
+        this.midPoint.set(vx, vy);
+
+        var dx = cx - vx;
+        var dy = cy - vy;
+
+        this.velocity.set(dx, dy);
+
+        this.angle = Angle(vx, vy, cx, cy);
+
+        this.distance = Math.sqrt(dx * dx + dy * dy);
     },
 
     /**
-    * Add a click trampoline to this pointer.
-    *
-    * A click trampoline is a callback that is run on the DOM 'click' event; this is primarily
-    * needed with certain browsers (ie. IE11) which restrict some actions like requestFullscreen
-    * to the DOM 'click' event and reject it for 'pointer*' and 'mouse*' events.
-    *
-    * This is used internally by the ScaleManager; click trampoline usage is uncommon.
-    * Click trampolines can only be added to pointers that are currently down.
-    *
-    * @method Phaser.Pointer#addClickTrampoline
-    * @protected
-    * @param {string} name - The name of the trampoline; must be unique among active trampolines in this pointer.
-    * @param {function} callback - Callback to run/trampoline.
-    * @param {object} callbackContext - Context of the callback.
-    * @param {object[]|null} callbackArgs - Additional callback args, if any. Supplied as an array.
-    */
-    addClickTrampoline: function (name, callback, callbackContext, callbackArgs) {
+     * Internal method to handle a Mouse Up Event.
+     *
+     * @method Phaser.Input.Pointer#up
+     * @private
+     * @since 3.0.0
+     *
+     * @param {MouseEvent} event - The Mouse Event to process.
+     */
+    up: function (event)
+    {
+        if ('buttons' in event)
+        {
+            this.buttons = event.buttons;
+        }
+
+        this.event = event;
+
+        this.button = event.button;
+
+        this.upElement = event.target;
+
+        //  Sets the local x/y properties
+        this.manager.transformPointer(this, event.pageX, event.pageY, false);
+
+        //  0: Main button pressed, usually the left button or the un-initialized state
+        if (event.button === 0)
+        {
+            this.primaryDown = false;
+            this.upX = this.x;
+            this.upY = this.y;
+        }
+
+        if (this.buttons === 0)
+        {
+            //  No more buttons are still down
+            this.isDown = false;
+
+            this.upTime = event.timeStamp;
+
+            this.wasTouch = false;
+        }
+    },
+
+    /**
+     * Internal method to handle a Mouse Down Event.
+     *
+     * @method Phaser.Input.Pointer#down
+     * @private
+     * @since 3.0.0
+     *
+     * @param {MouseEvent} event - The Mouse Event to process.
+     */
+    down: function (event)
+    {
+        if ('buttons' in event)
+        {
+            this.buttons = event.buttons;
+        }
+
+        this.event = event;
+
+        this.button = event.button;
+
+        this.downElement = event.target;
+
+        //  Sets the local x/y properties
+        this.manager.transformPointer(this, event.pageX, event.pageY, false);
+
+        //  0: Main button pressed, usually the left button or the un-initialized state
+        if (event.button === 0)
+        {
+            this.primaryDown = true;
+            this.downX = this.x;
+            this.downY = this.y;
+        }
+
+        if (OS.macOS && event.ctrlKey)
+        {
+            //  Override button settings on macOS
+            this.buttons = 2;
+            this.primaryDown = false;
+        }
 
         if (!this.isDown)
         {
-            return;
+            this.isDown = true;
+
+            this.downTime = event.timeStamp;
         }
 
-        var trampolines = (this._clickTrampolines = this._clickTrampolines || []);
-
-        for (var i = 0; i < trampolines.length; i++)
-        {
-            if (trampolines[i].name === name)
-            {
-                trampolines.splice(i, 1);
-                break;
-            }
-        }
-
-        trampolines.push({
-            name: name,
-            targetObject: this.targetObject,
-            callback: callback,
-            callbackContext: callbackContext,
-            callbackArgs: callbackArgs
-        });
-
+        this.wasTouch = false;
     },
 
     /**
-    * Fire all click trampolines for which the pointers are still refering to the registered object.
-    * @method Phaser.Pointer#processClickTrampolines
-    * @private
-    */
-    processClickTrampolines: function () {
-
-        var trampolines = this._clickTrampolines;
-        if (!trampolines)
-        {
-            return;
-        }
-
-        for (var i = 0; i < trampolines.length; i++)
-        {
-            var trampoline = trampolines[i];
-
-            if (trampoline.targetObject === this._trampolineTargetObject)
-            {
-                trampoline.callback.apply(trampoline.callbackContext, trampoline.callbackArgs);
-            }
-        }
-
-        this._clickTrampolines = null;
-        this._trampolineTargetObject = null;
-
-    },
-
-    /**
-    * Resets the Pointer properties. Called by InputManager.reset when you perform a State change.
-    * @method Phaser.Pointer#reset
-    */
-    reset: function () {
-
-        if (this.isMouse === false)
-        {
-            this.active = false;
-        }
-
-        this.pointerId = null;
-        this.identifier = null;
-        this.dirty = false;
-        this.isDown = false;
-        this.isUp = true;
-        this.totalTouches = 0;
-        this._holdSent = false;
-        this._history.length = 0;
-        this._stateReset = true;
-
-        if (this.targetObject)
-        {
-            this.targetObject._releasedHandler(this);
-        }
-
-        this.targetObject = null;
-
-    },
-
-    /**
-     * Resets the movementX and movementY properties. Use in your update handler after retrieving the values.
-     * @method Phaser.Pointer#resetMovement
+     * Internal method to handle a Mouse Move Event.
+     *
+     * @method Phaser.Input.Pointer#move
+     * @private
+     * @since 3.0.0
+     *
+     * @param {MouseEvent} event - The Mouse Event to process.
      */
-    resetMovement: function() {
+    move: function (event)
+    {
+        if ('buttons' in event)
+        {
+            this.buttons = event.buttons;
+        }
 
+        this.event = event;
+
+        //  Sets the local x/y properties
+        this.manager.transformPointer(this, event.pageX, event.pageY, true);
+
+        if (this.locked)
+        {
+            //  Multiple DOM events may occur within one frame, but only one Phaser event will fire
+            this.movementX = event.movementX || event.mozMovementX || event.webkitMovementX || 0;
+            this.movementY = event.movementY || event.mozMovementY || event.webkitMovementY || 0;
+        }
+
+        this.moveTime = event.timeStamp;
+
+        this.wasTouch = false;
+    },
+
+    /**
+     * Internal method to handle a Mouse Wheel Event.
+     *
+     * @method Phaser.Input.Pointer#wheel
+     * @private
+     * @since 3.18.0
+     *
+     * @param {WheelEvent} event - The Wheel Event to process.
+     */
+    wheel: function (event)
+    {
+        if ('buttons' in event)
+        {
+            this.buttons = event.buttons;
+        }
+
+        this.event = event;
+
+        //  Sets the local x/y properties
+        this.manager.transformPointer(this, event.pageX, event.pageY, false);
+
+        this.deltaX = event.deltaX;
+        this.deltaY = event.deltaY;
+        this.deltaZ = event.deltaZ;
+
+        this.wasTouch = false;
+    },
+
+    /**
+     * Internal method to handle a Touch Start Event.
+     *
+     * @method Phaser.Input.Pointer#touchstart
+     * @private
+     * @since 3.0.0
+     *
+     * @param {Touch} touch - The Changed Touch from the Touch Event.
+     * @param {TouchEvent} event - The full Touch Event.
+     */
+    touchstart: function (touch, event)
+    {
+        if (touch['pointerId'])
+        {
+            this.pointerId = touch.pointerId;
+        }
+
+        this.identifier = touch.identifier;
+        this.target = touch.target;
+        this.active = true;
+
+        this.buttons = 1;
+
+        this.event = event;
+
+        this.downElement = touch.target;
+
+        //  Sets the local x/y properties
+        this.manager.transformPointer(this, touch.pageX, touch.pageY, false);
+
+        this.primaryDown = true;
+        this.downX = this.x;
+        this.downY = this.y;
+        this.downTime = event.timeStamp;
+
+        this.isDown = true;
+
+        this.wasTouch = true;
+        this.wasCanceled = false;
+
+        this.updateMotion();
+    },
+
+    /**
+     * Internal method to handle a Touch Move Event.
+     *
+     * @method Phaser.Input.Pointer#touchmove
+     * @private
+     * @since 3.0.0
+     *
+     * @param {Touch} touch - The Changed Touch from the Touch Event.
+     * @param {TouchEvent} event - The full Touch Event.
+     */
+    touchmove: function (touch, event)
+    {
+        this.event = event;
+
+        //  Sets the local x/y properties
+        this.manager.transformPointer(this, touch.pageX, touch.pageY, true);
+
+        this.moveTime = event.timeStamp;
+
+        this.wasTouch = true;
+
+        this.updateMotion();
+    },
+
+    /**
+     * Internal method to handle a Touch End Event.
+     *
+     * @method Phaser.Input.Pointer#touchend
+     * @private
+     * @since 3.0.0
+     *
+     * @param {Touch} touch - The Changed Touch from the Touch Event.
+     * @param {TouchEvent} event - The full Touch Event.
+     */
+    touchend: function (touch, event)
+    {
+        this.buttons = 0;
+
+        this.event = event;
+
+        this.upElement = touch.target;
+
+        //  Sets the local x/y properties
+        this.manager.transformPointer(this, touch.pageX, touch.pageY, false);
+
+        this.primaryDown = false;
+        this.upX = this.x;
+        this.upY = this.y;
+        this.upTime = event.timeStamp;
+
+        this.isDown = false;
+
+        this.wasTouch = true;
+        this.wasCanceled = false;
+
+        this.active = false;
+
+        this.updateMotion();
+    },
+
+    /**
+     * Internal method to handle a Touch Cancel Event.
+     *
+     * @method Phaser.Input.Pointer#touchcancel
+     * @private
+     * @since 3.15.0
+     *
+     * @param {Touch} touch - The Changed Touch from the Touch Event.
+     * @param {TouchEvent} event - The full Touch Event.
+     */
+    touchcancel: function (touch, event)
+    {
+        this.buttons = 0;
+
+        this.event = event;
+
+        this.upElement = touch.target;
+
+        //  Sets the local x/y properties
+        this.manager.transformPointer(this, touch.pageX, touch.pageY, false);
+
+        this.primaryDown = false;
+        this.upX = this.x;
+        this.upY = this.y;
+        this.upTime = event.timeStamp;
+
+        this.isDown = false;
+
+        this.wasTouch = true;
+        this.wasCanceled = true;
+
+        this.active = false;
+    },
+
+    /**
+     * Checks to see if any buttons are being held down on this Pointer.
+     *
+     * @method Phaser.Input.Pointer#noButtonDown
+     * @since 3.0.0
+     *
+     * @return {boolean} `true` if no buttons are being held down.
+     */
+    noButtonDown: function ()
+    {
+        return (this.buttons === 0);
+    },
+
+    /**
+     * Checks to see if the left button is being held down on this Pointer.
+     *
+     * @method Phaser.Input.Pointer#leftButtonDown
+     * @since 3.0.0
+     *
+     * @return {boolean} `true` if the left button is being held down.
+     */
+    leftButtonDown: function ()
+    {
+        return (this.buttons & 1) ? true : false;
+    },
+
+    /**
+     * Checks to see if the right button is being held down on this Pointer.
+     *
+     * @method Phaser.Input.Pointer#rightButtonDown
+     * @since 3.0.0
+     *
+     * @return {boolean} `true` if the right button is being held down.
+     */
+    rightButtonDown: function ()
+    {
+        return (this.buttons & 2) ? true : false;
+    },
+
+    /**
+     * Checks to see if the middle button is being held down on this Pointer.
+     *
+     * @method Phaser.Input.Pointer#middleButtonDown
+     * @since 3.0.0
+     *
+     * @return {boolean} `true` if the middle button is being held down.
+     */
+    middleButtonDown: function ()
+    {
+        return (this.buttons & 4) ? true : false;
+    },
+
+    /**
+     * Checks to see if the back button is being held down on this Pointer.
+     *
+     * @method Phaser.Input.Pointer#backButtonDown
+     * @since 3.0.0
+     *
+     * @return {boolean} `true` if the back button is being held down.
+     */
+    backButtonDown: function ()
+    {
+        return (this.buttons & 8) ? true : false;
+    },
+
+    /**
+     * Checks to see if the forward button is being held down on this Pointer.
+     *
+     * @method Phaser.Input.Pointer#forwardButtonDown
+     * @since 3.0.0
+     *
+     * @return {boolean} `true` if the forward button is being held down.
+     */
+    forwardButtonDown: function ()
+    {
+        return (this.buttons & 16) ? true : false;
+    },
+
+    /**
+     * Checks to see if the release of the left button was the most recent activity on this Pointer.
+     *
+     * @method Phaser.Input.Pointer#leftButtonReleased
+     * @since 3.18.0
+     *
+     * @return {boolean} `true` if the release of the left button was the most recent activity on this Pointer.
+     */
+    leftButtonReleased: function ()
+    {
+        return this.buttons === 0 ? (this.button === 0 && !this.isDown) : this.button === 0;
+    },
+
+    /**
+     * Checks to see if the release of the right button was the most recent activity on this Pointer.
+     *
+     * @method Phaser.Input.Pointer#rightButtonReleased
+     * @since 3.18.0
+     *
+     * @return {boolean} `true` if the release of the right button was the most recent activity on this Pointer.
+     */
+    rightButtonReleased: function ()
+    {
+        return this.buttons === 0 ? (this.button === 2 && !this.isDown) : this.button === 2;
+    },
+
+    /**
+     * Checks to see if the release of the middle button was the most recent activity on this Pointer.
+     *
+     * @method Phaser.Input.Pointer#middleButtonReleased
+     * @since 3.18.0
+     *
+     * @return {boolean} `true` if the release of the middle button was the most recent activity on this Pointer.
+     */
+    middleButtonReleased: function ()
+    {
+        return this.buttons === 0 ? (this.button === 1 && !this.isDown) : this.button === 1;
+    },
+
+    /**
+     * Checks to see if the release of the back button was the most recent activity on this Pointer.
+     *
+     * @method Phaser.Input.Pointer#backButtonReleased
+     * @since 3.18.0
+     *
+     * @return {boolean} `true` if the release of the back button was the most recent activity on this Pointer.
+     */
+    backButtonReleased: function ()
+    {
+        return this.buttons === 0 ? (this.button === 3 && !this.isDown) : this.button === 3;
+    },
+
+    /**
+     * Checks to see if the release of the forward button was the most recent activity on this Pointer.
+     *
+     * @method Phaser.Input.Pointer#forwardButtonReleased
+     * @since 3.18.0
+     *
+     * @return {boolean} `true` if the release of the forward button was the most recent activity on this Pointer.
+     */
+    forwardButtonReleased: function ()
+    {
+        return this.buttons === 0 ? (this.button === 4 && !this.isDown) : this.button === 4;
+    },
+
+    /**
+     * If the Pointer has a button pressed down at the time this method is called, it will return the
+     * distance between the Pointer's `downX` and `downY` values and the current position.
+     *
+     * If no button is held down, it will return the last recorded distance, based on where
+     * the Pointer was when the button was released.
+     *
+     * If you wish to get the distance being travelled currently, based on the velocity of the Pointer,
+     * then see the `Pointer.distance` property.
+     *
+     * @method Phaser.Input.Pointer#getDistance
+     * @since 3.13.0
+     *
+     * @return {number} The distance the Pointer moved.
+     */
+    getDistance: function ()
+    {
+        if (this.isDown)
+        {
+            return Distance(this.downX, this.downY, this.x, this.y);
+        }
+        else
+        {
+            return Distance(this.downX, this.downY, this.upX, this.upY);
+        }
+    },
+
+    /**
+     * If the Pointer has a button pressed down at the time this method is called, it will return the
+     * horizontal distance between the Pointer's `downX` value and the current `x` position.
+     *
+     * If no button is held down, it will return the last recorded horizontal distance, based on where
+     * the Pointer was when the button was released.
+     *
+     * @method Phaser.Input.Pointer#getDistanceX
+     * @since 3.16.0
+     *
+     * @return {number} The horizontal distance the Pointer moved.
+     */
+    getDistanceX: function ()
+    {
+        if (this.isDown)
+        {
+            return Math.abs(this.downX - this.x);
+        }
+        else
+        {
+            return Math.abs(this.downX - this.upX);
+        }
+    },
+
+    /**
+     * If the Pointer has a button pressed down at the time this method is called, it will return the
+     * vertical distance between the Pointer's `downY` value and the current `y` position.
+     *
+     * If no button is held down, it will return the last recorded vertical distance, based on where
+     * the Pointer was when the button was released.
+     *
+     * @method Phaser.Input.Pointer#getDistanceY
+     * @since 3.16.0
+     *
+     * @return {number} The vertical distance the Pointer moved.
+     */
+    getDistanceY: function ()
+    {
+        if (this.isDown)
+        {
+            return Math.abs(this.downY - this.y);
+        }
+        else
+        {
+            return Math.abs(this.downY - this.upY);
+        }
+    },
+
+    /**
+     * If the Pointer has a button pressed down at the time this method is called, it will return the
+     * duration since the button was pressed down.
+     *
+     * If no button is held down, it will return the last recorded duration, based on the time
+     * the last button on the Pointer was released.
+     *
+     * @method Phaser.Input.Pointer#getDuration
+     * @since 3.16.0
+     *
+     * @return {number} The duration the Pointer was held down for in milliseconds.
+     */
+    getDuration: function ()
+    {
+        if (this.isDown)
+        {
+            return (this.manager.time - this.downTime);
+        }
+        else
+        {
+            return (this.upTime - this.downTime);
+        }
+    },
+
+    /**
+     * If the Pointer has a button pressed down at the time this method is called, it will return the
+     * angle between the Pointer's `downX` and `downY` values and the current position.
+     *
+     * If no button is held down, it will return the last recorded angle, based on where
+     * the Pointer was when the button was released.
+     *
+     * The angle is based on the old position facing to the current position.
+     *
+     * If you wish to get the current angle, based on the velocity of the Pointer, then
+     * see the `Pointer.angle` property.
+     *
+     * @method Phaser.Input.Pointer#getAngle
+     * @since 3.16.0
+     *
+     * @return {number} The angle between the Pointer's coordinates in radians.
+     */
+    getAngle: function ()
+    {
+        if (this.isDown)
+        {
+            return Angle(this.downX, this.downY, this.x, this.y);
+        }
+        else
+        {
+            return Angle(this.downX, this.downY, this.upX, this.upY);
+        }
+    },
+
+    /**
+     * Takes the previous and current Pointer positions and then generates an array of interpolated values between
+     * the two. The array will be populated up to the size of the `steps` argument.
+     *
+     * ```javascript
+     * var points = pointer.getInterpolatedPosition(4);
+     *
+     * // points[0] = { x: 0, y: 0 }
+     * // points[1] = { x: 2, y: 1 }
+     * // points[2] = { x: 3, y: 2 }
+     * // points[3] = { x: 6, y: 3 }
+     * ```
+     *
+     * Use this if you need to get smoothed values between the previous and current pointer positions. DOM pointer
+     * events can often fire faster than the main browser loop, and this will help you avoid janky movement
+     * especially if you have an object following a Pointer.
+     *
+     * Note that if you provide an output array it will only be populated up to the number of steps provided.
+     * It will not clear any previous data that may have existed beyond the range of the steps count.
+     *
+     * Internally it uses the Smooth Step interpolation calculation.
+     *
+     * @method Phaser.Input.Pointer#getInterpolatedPosition
+     * @since 3.11.0
+     *
+     * @param {number} [steps=10] - The number of interpolation steps to use.
+     * @param {array} [out] - An array to store the results in. If not provided a new one will be created.
+     *
+     * @return {array} An array of interpolated values.
+     */
+    getInterpolatedPosition: function (steps, out)
+    {
+        if (steps === undefined) { steps = 10; }
+        if (out === undefined) { out = []; }
+
+        var prevX = this.prevPosition.x;
+        var prevY = this.prevPosition.y;
+
+        var curX = this.position.x;
+        var curY = this.position.y;
+
+        for (var i = 0; i < steps; i++)
+        {
+            var t = (1 / steps) * i;
+
+            out[i] = { x: SmoothStepInterpolation(t, prevX, curX), y: SmoothStepInterpolation(t, prevY, curY) };
+        }
+
+        return out;
+    },
+
+    /**
+     * Fully reset this Pointer back to its uninitialized state.
+     *
+     * @method Phaser.Input.Pointer#reset
+     * @since 3.60.0
+     */
+    reset: function ()
+    {
+        this.event = null;
+        this.downElement = null;
+        this.upElement = null;
+
+        this.button = 0;
+        this.buttons = 0;
+
+        this.position.set(0, 0);
+        this.prevPosition.set(0, 0);
+        this.midPoint.set(-1, -1);
+        this.velocity.set(0, 0);
+        this.angle = 0;
+        this.distance = 0;
+        this.worldX = 0;
+        this.worldY = 0;
+        this.downX = 0;
+        this.downY = 0;
+        this.upX = 0;
+        this.upY = 0;
+        this.moveTime = 0;
+        this.upTime = 0;
+        this.downTime = 0;
+        this.primaryDown = false;
+        this.isDown = false;
+        this.wasTouch = false;
+        this.wasCanceled = false;
         this.movementX = 0;
         this.movementY = 0;
+        this.identifier = 0;
+        this.pointerId = null;
+        this.deltaX = 0;
+        this.deltaY = 0;
+        this.deltaZ = 0;
 
-    }
+        this.active = (this.id === 0) ? true : false;
+    },
 
-};
+    /**
+     * Destroys this Pointer instance and resets its external references.
+     *
+     * @method Phaser.Input.Pointer#destroy
+     * @since 3.0.0
+     */
+    destroy: function ()
+    {
+        this.camera = null;
+        this.manager = null;
+        this.position = null;
+    },
 
-Phaser.Pointer.prototype.constructor = Phaser.Pointer;
+    /**
+     * The x position of this Pointer.
+     * The value is in screen space.
+     * See `worldX` to get a camera converted position.
+     *
+     * @name Phaser.Input.Pointer#x
+     * @type {number}
+     * @since 3.0.0
+     */
+    x: {
 
-/**
-* How long the Pointer has been depressed on the touchscreen. If not currently down it returns -1.
-* @name Phaser.Pointer#duration
-* @property {number} duration - How long the Pointer has been depressed on the touchscreen. If not currently down it returns -1.
-* @readonly
-*/
-Object.defineProperty(Phaser.Pointer.prototype, "duration", {
-
-    get: function () {
-
-        if (this.isUp)
+        get: function ()
         {
-            return -1;
+            return this.position.x;
+        },
+
+        set: function (value)
+        {
+            this.position.x = value;
         }
 
-        return this.game.time.time - this.timeDown;
+    },
+
+    /**
+     * The y position of this Pointer.
+     * The value is in screen space.
+     * See `worldY` to get a camera converted position.
+     *
+     * @name Phaser.Input.Pointer#y
+     * @type {number}
+     * @since 3.0.0
+     */
+    y: {
+
+        get: function ()
+        {
+            return this.position.y;
+        },
+
+        set: function (value)
+        {
+            this.position.y = value;
+        }
+
+    },
+
+    /**
+     * Time when this Pointer was most recently updated by a DOM Event.
+     * This comes directly from the `event.timeStamp` property.
+     * If no event has yet taken place, it will return zero.
+     *
+     * @name Phaser.Input.Pointer#time
+     * @type {number}
+     * @readonly
+     * @since 3.16.0
+     */
+    time: {
+
+        get: function ()
+        {
+            return (this.event) ? this.event.timeStamp : 0;
+        }
 
     }
 
 });
 
-/**
-* Gets the X value of this Pointer in world coordinates based on the world camera.
-* @name Phaser.Pointer#worldX
-* @property {number} duration - The X value of this Pointer in world coordinates based on the world camera.
-* @readonly
-*/
-Object.defineProperty(Phaser.Pointer.prototype, "worldX", {
-
-    get: function () {
-
-        return this.game.world.camera.x + this.x;
-
-    }
-
-});
-
-/**
-* Gets the Y value of this Pointer in world coordinates based on the world camera.
-* @name Phaser.Pointer#worldY
-* @property {number} duration - The Y value of this Pointer in world coordinates based on the world camera.
-* @readonly
-*/
-Object.defineProperty(Phaser.Pointer.prototype, "worldY", {
-
-    get: function () {
-
-        return this.game.world.camera.y + this.y;
-
-    }
-
-});
+module.exports = Pointer;
